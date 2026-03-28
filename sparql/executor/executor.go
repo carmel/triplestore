@@ -1,0 +1,2395 @@
+package executor
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/carmel/triplestore/rdf"
+	"github.com/carmel/triplestore/sparql/dataset"
+	"github.com/carmel/triplestore/sparql/evaluator"
+	"github.com/carmel/triplestore/sparql/optimizer"
+	"github.com/carmel/triplestore/sparql/parser"
+	"github.com/carmel/triplestore/store"
+)
+
+// Executor executes SPARQL queries using the Volcano iterator model
+type Executor struct {
+	store         *store.TripleStore
+	datasetLoader *dataset.Loader
+}
+
+// NewExecutor creates a new query executor
+func NewExecutor(store *store.TripleStore, baseDir string) *Executor {
+	return &Executor{
+		store:         store,
+		datasetLoader: dataset.NewLoader(baseDir),
+	}
+}
+
+// ExecutionOptions provides options for query execution
+type ExecutionOptions struct {
+	BaseDir string // Optional: override default base directory for file resolution
+}
+
+// Execute executes an optimized query
+func (e *Executor) Execute(query *optimizer.OptimizedQuery) (QueryResult, error) {
+	return e.ExecuteWithOptions(query, nil)
+}
+
+// ExecuteWithOptions executes an optimized query with options
+func (e *Executor) ExecuteWithOptions(query *optimizer.OptimizedQuery, opts *ExecutionOptions) (QueryResult, error) {
+	var from, fromNamed []string
+
+	// Extract FROM/FROM NAMED based on query type
+	switch query.Original.QueryType {
+	case parser.QueryTypeSelect:
+		from = query.Original.Select.From
+		fromNamed = query.Original.Select.FromNamed
+	case parser.QueryTypeConstruct:
+		from = query.Original.Construct.From
+		fromNamed = query.Original.Construct.FromNamed
+	case parser.QueryTypeAsk:
+		from = query.Original.Ask.From
+		fromNamed = query.Original.Ask.FromNamed
+	case parser.QueryTypeDescribe:
+		from = query.Original.Describe.From
+		fromNamed = query.Original.Describe.FromNamed
+	}
+
+	// Check if query has dataset specification
+	hasDataset := len(from) > 0 || len(fromNamed) > 0
+
+	if hasDataset {
+		// Build load options with base directory override if provided
+		loadOpts := &dataset.LoadOptions{}
+		if opts != nil && opts.BaseDir != "" {
+			loadOpts.BaseDir = opts.BaseDir
+		}
+		return e.executeWithDataset(query, from, fromNamed, loadOpts)
+	}
+
+	// Execute without dataset (use main store)
+	return e.executeWithoutDataset(query)
+}
+
+// executeWithDataset loads dataset and executes query on temporary store
+func (e *Executor) executeWithDataset(query *optimizer.OptimizedQuery, from []string, fromNamed []string, opts *dataset.LoadOptions) (QueryResult, error) {
+	// Load dataset into temporary store
+	loadedDataset, err := e.datasetLoader.Load(from, fromNamed, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load dataset: %w", err)
+	}
+
+	// Create temporary executor with dataset store
+	tempExecutor := &Executor{
+		store:         loadedDataset.Store,
+		datasetLoader: e.datasetLoader,
+	}
+
+	// Execute query on temporary store
+	return tempExecutor.executeWithoutDataset(query)
+}
+
+// executeWithoutDataset executes query without dataset loading
+func (e *Executor) executeWithoutDataset(query *optimizer.OptimizedQuery) (QueryResult, error) {
+	switch query.Original.QueryType {
+	case parser.QueryTypeSelect:
+		return e.executeSelect(query)
+	case parser.QueryTypeAsk:
+		return e.executeAsk(query)
+	case parser.QueryTypeConstruct:
+		return e.executeConstruct(query)
+	case parser.QueryTypeDescribe:
+		return e.executeDescribe(query)
+	default:
+		return nil, fmt.Errorf("unsupported query type")
+	}
+}
+
+// QueryResult represents the result of a query
+type QueryResult interface {
+	resultType()
+}
+
+// SelectResult represents the result of a SELECT query
+type SelectResult struct {
+	Variables []*parser.Variable
+	Bindings  []*store.Binding
+}
+
+func (r *SelectResult) resultType() {}
+
+// AskResult represents the result of an ASK query
+type AskResult struct {
+	Result bool
+}
+
+func (r *AskResult) resultType() {}
+
+// ConstructResult represents the result of a CONSTRUCT query
+type ConstructResult struct {
+	Triples []*Triple
+}
+
+// Triple represents an RDF triple (subject, predicate, object)
+type Triple struct {
+	Subject   Term
+	Predicate Term
+	Object    Term
+}
+
+// Term represents an RDF term (for CONSTRUCT results)
+type Term struct {
+	Type     string // "iri", "blank", "literal"
+	Value    string
+	Datatype string // For typed literals (IRI of datatype)
+	Language string // For language-tagged literals
+}
+
+func (r *ConstructResult) resultType() {}
+
+// executeSelect executes a SELECT query
+func (e *Executor) executeSelect(query *optimizer.OptimizedQuery) (*SelectResult, error) {
+	// Create iterator from plan
+	iter, err := e.createIterator(query.Plan)
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	// Collect all bindings
+	var bindings []*store.Binding
+	for iter.Next() {
+		binding := iter.Binding()
+		// Clone to avoid mutation
+		bindings = append(bindings, binding.Clone())
+	}
+
+	// Determine variables list
+	variables := query.Original.Select.Variables
+	if variables == nil {
+		// SELECT * - extract variables from WHERE clause in order they appear
+		variables = extractVariablesFromGraphPattern(query.Original.Select.Where)
+	}
+
+	// Note: DISTINCT and REDUCED are now handled by the query plan iterators
+	// (DistinctPlan/ReducedPlan) in the correct order relative to projection/offset/limit
+	// per SPARQL 1.1 spec section 15
+
+	return &SelectResult{
+		Variables: variables,
+		Bindings:  bindings,
+	}, nil
+}
+
+// bindingSignature creates a unique string representation of a binding
+func bindingSignature(binding *store.Binding) string {
+	var parts []string
+	for varName, term := range binding.Vars {
+		parts = append(parts, varName+"="+termSignature(term))
+	}
+	// Sort to ensure consistent ordering
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
+}
+
+// termSignature creates a unique string representation of an RDF term
+// Per RDF/SPARQL semantics, plain literals are equivalent to xsd:string literals
+func termSignature(term rdf.Term) string {
+	switch t := term.(type) {
+	case *rdf.NamedNode:
+		return "iri:" + t.IRI
+	case *rdf.BlankNode:
+		return "blank:" + t.ID
+	case *rdf.Literal:
+		sig := "lit:" + t.Value
+		if t.Language != "" {
+			sig += "@" + t.Language
+		}
+		// Normalize: plain literals (no language, no datatype or xsd:string datatype)
+		// are equivalent per RDF semantics
+		if t.Datatype != nil && t.Datatype.IRI != "http://www.w3.org/2001/XMLSchema#string" {
+			sig += "^^" + t.Datatype.IRI
+		}
+		return sig
+	default:
+		return "unknown:" + fmt.Sprintf("%v", term)
+	}
+}
+
+// executeAsk executes an ASK query
+func (e *Executor) executeAsk(query *optimizer.OptimizedQuery) (*AskResult, error) {
+	// Create iterator from plan
+	iter, err := e.createIterator(query.Plan)
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	// Check if there's at least one result
+	result := iter.Next()
+
+	return &AskResult{Result: result}, nil
+}
+
+// executeConstruct executes a CONSTRUCT query
+func (e *Executor) executeConstruct(query *optimizer.OptimizedQuery) (*ConstructResult, error) {
+	// Get the template from the construct plan
+	constructPlan, ok := query.Plan.(*optimizer.ConstructPlan)
+	if !ok {
+		return nil, fmt.Errorf("expected ConstructPlan")
+	}
+
+	// Create iterator from the input plan (WHERE clause)
+	iter, err := e.createIterator(constructPlan.Input)
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	// Collect triples by instantiating template for each binding
+	var triples []*Triple
+	seenTriples := make(map[string]bool) // For deduplication
+	solutionIndex := 0                   // Track solution number for fresh blank nodes
+
+	for iter.Next() {
+		binding := iter.Binding()
+		solutionIndex++
+
+		// Create a blank node mapping for this solution
+		// Blank nodes in the template get fresh identifiers per solution
+		blankNodeMap := make(map[string]string)
+
+		// Instantiate each triple pattern in the template
+		for _, pattern := range constructPlan.Template {
+			triple, err := e.instantiateTriplePatternWithBNodes(pattern, binding, solutionIndex, blankNodeMap)
+			if err != nil {
+				// Skip triples that can't be instantiated (e.g., unbound variables)
+				continue
+			}
+
+			// Deduplicate triples (include datatype and language in key)
+			key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
+				triple.Subject.Value, triple.Subject.Type,
+				triple.Predicate.Value, triple.Predicate.Type,
+				triple.Object.Value, triple.Object.Datatype, triple.Object.Language)
+			if !seenTriples[key] {
+				seenTriples[key] = true
+				triples = append(triples, triple)
+			}
+		}
+	}
+
+	return &ConstructResult{Triples: triples}, nil
+}
+
+// executeDescribe executes a DESCRIBE query
+func (e *Executor) executeDescribe(query *optimizer.OptimizedQuery) (*ConstructResult, error) {
+	// Get the describe plan
+	describePlan, ok := query.Plan.(*optimizer.DescribePlan)
+	if !ok {
+		return nil, fmt.Errorf("expected DescribePlan")
+	}
+
+	// Collect resources to describe
+	var resourcesToDescribe []rdf.Term
+
+	if describePlan.Input != nil {
+		// Execute WHERE clause to find resources dynamically
+		iter, err := e.createIterator(describePlan.Input)
+		if err != nil {
+			return nil, err
+		}
+		defer iter.Close()
+
+		// Collect all IRIs from bindings
+		seen := make(map[string]bool)
+		for iter.Next() {
+			binding := iter.Binding()
+			// Add all bound IRIs (named nodes) to resources
+			for _, term := range binding.Vars {
+				if namedNode, ok := term.(*rdf.NamedNode); ok {
+					key := namedNode.IRI
+					if !seen[key] {
+						seen[key] = true
+						resourcesToDescribe = append(resourcesToDescribe, namedNode)
+					}
+				}
+			}
+		}
+	} else {
+		// Use resources directly from DESCRIBE clause
+		for _, resource := range describePlan.Resources {
+			resourcesToDescribe = append(resourcesToDescribe, resource)
+		}
+	}
+
+	// For each resource, get all triples where it's the subject (CBD - Concise Bounded Description)
+	var triples []*Triple
+	seenTriples := make(map[string]bool)
+
+	for _, resource := range resourcesToDescribe {
+		// Query pattern: <resource> ?p ?o
+		pattern := &store.Pattern{
+			Subject:   resource,
+			Predicate: &store.Variable{Name: "p"},
+			Object:    &store.Variable{Name: "o"},
+			Graph:     &store.Variable{Name: "g"},
+		}
+
+		iter, err := e.store.Query(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query store for resource %s: %w", resource.String(), err)
+		}
+
+		for iter.Next() {
+			quad, err := iter.Quad()
+			if err != nil {
+				if closeErr := iter.Close(); closeErr != nil {
+					return nil, fmt.Errorf("error closing iterator: %w (after quad error: %v)", closeErr, err)
+				}
+				return nil, err
+			}
+
+			// Convert to executor.Triple
+			triple := &Triple{
+				Subject:   Term{Type: "iri", Value: quad.Subject.String()},
+				Predicate: Term{Type: "iri", Value: quad.Predicate.String()},
+				Object:    e.rdfTermToExecutorTerm(quad.Object),
+			}
+
+			// Deduplicate triples (include datatype and language in key)
+			key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
+				triple.Subject.Value, triple.Subject.Type,
+				triple.Predicate.Value, triple.Predicate.Type,
+				triple.Object.Value, triple.Object.Datatype, triple.Object.Language)
+			if !seenTriples[key] {
+				seenTriples[key] = true
+				triples = append(triples, triple)
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, fmt.Errorf("error closing iterator: %w", err)
+		}
+	}
+
+	return &ConstructResult{Triples: triples}, nil
+}
+
+// rdfTermToExecutorTerm converts an rdf.Term to executor.Term
+func (e *Executor) rdfTermToExecutorTerm(term rdf.Term) Term {
+	switch t := term.(type) {
+	case *rdf.NamedNode:
+		return Term{Type: "iri", Value: t.IRI}
+	case *rdf.BlankNode:
+		return Term{Type: "blank", Value: t.ID}
+	case *rdf.Literal:
+		result := Term{Type: "literal", Value: t.Value}
+		if t.Datatype != nil {
+			result.Datatype = t.Datatype.IRI
+		}
+		if t.Language != "" {
+			result.Language = t.Language
+		}
+		return result
+	default:
+		return Term{Type: "literal", Value: term.String()}
+	}
+}
+
+// instantiateTriplePattern creates a triple from a pattern and binding
+//
+//lint:ignore U1000 Kept for potential non-CONSTRUCT uses
+func (e *Executor) instantiateTriplePattern(pattern *parser.TriplePattern, binding *store.Binding) (*Triple, error) {
+	subject, err := e.instantiateTerm(pattern.Subject, binding)
+	if err != nil {
+		return nil, err
+	}
+
+	predicate, err := e.instantiateTerm(pattern.Predicate, binding)
+	if err != nil {
+		return nil, err
+	}
+
+	object, err := e.instantiateTerm(pattern.Object, binding)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Triple{
+		Subject:   subject,
+		Predicate: predicate,
+		Object:    object,
+	}, nil
+}
+
+// instantiateTriplePatternWithBNodes instantiates a triple pattern with fresh blank nodes per solution
+func (e *Executor) instantiateTriplePatternWithBNodes(pattern *parser.TriplePattern, binding *store.Binding, solutionIndex int, blankNodeMap map[string]string) (*Triple, error) {
+	subject, err := e.instantiateTermWithBNodes(pattern.Subject, binding, solutionIndex, blankNodeMap)
+	if err != nil {
+		return nil, err
+	}
+
+	predicate, err := e.instantiateTermWithBNodes(pattern.Predicate, binding, solutionIndex, blankNodeMap)
+	if err != nil {
+		return nil, err
+	}
+
+	object, err := e.instantiateTermWithBNodes(pattern.Object, binding, solutionIndex, blankNodeMap)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Triple{
+		Subject:   subject,
+		Predicate: predicate,
+		Object:    object,
+	}, nil
+}
+
+// instantiateTerm converts a TermOrVariable to a concrete Term using bindings
+//
+//lint:ignore U1000 Kept for potential non-CONSTRUCT uses
+func (e *Executor) instantiateTerm(termOrVar parser.TermOrVariable, binding *store.Binding) (Term, error) {
+	if termOrVar.IsVariable() {
+		// Look up variable in binding
+		value, found := binding.Vars[termOrVar.Variable.Name]
+		if !found {
+			return Term{}, fmt.Errorf("unbound variable: %s", termOrVar.Variable.Name)
+		}
+		return e.rdfTermToExecutorTerm(value), nil
+	}
+
+	// It's a constant term
+	return e.rdfTermToExecutorTerm(termOrVar.Term), nil
+}
+
+// instantiateTermWithBNodes converts a TermOrVariable with fresh blank nodes per solution
+func (e *Executor) instantiateTermWithBNodes(termOrVar parser.TermOrVariable, binding *store.Binding, solutionIndex int, blankNodeMap map[string]string) (Term, error) {
+	if termOrVar.IsVariable() {
+		// Look up variable in binding
+		value, found := binding.Vars[termOrVar.Variable.Name]
+		if !found {
+			return Term{}, fmt.Errorf("unbound variable: %s", termOrVar.Variable.Name)
+		}
+		return e.rdfTermToExecutorTerm(value), nil
+	}
+
+	// Check if it's a blank node in the template
+	if blankNode, ok := termOrVar.Term.(*rdf.BlankNode); ok {
+		// Generate a fresh blank node identifier for this solution
+		originalLabel := blankNode.ID
+
+		// Check if we've already mapped this blank node in this solution
+		if freshLabel, exists := blankNodeMap[originalLabel]; exists {
+			// Reuse the same fresh blank node within this solution
+			return Term{Value: freshLabel, Type: "blank"}, nil
+		}
+
+		// Create a new fresh blank node identifier
+		freshLabel := fmt.Sprintf("%s_s%d", originalLabel, solutionIndex)
+		blankNodeMap[originalLabel] = freshLabel
+		return Term{Value: freshLabel, Type: "blank"}, nil
+	}
+
+	// It's a constant term (not a blank node)
+	return e.rdfTermToExecutorTerm(termOrVar.Term), nil
+}
+
+// createIterator creates an iterator from a query plan
+func (e *Executor) createIterator(plan optimizer.QueryPlan) (store.BindingIterator, error) {
+	return e.createIteratorWithContext(plan, nil)
+}
+
+// createIteratorWithJoinContext creates an iterator with join context binding
+// This is used by nested loop joins to constrain the right side with left bindings
+func (e *Executor) createIteratorWithJoinContext(plan optimizer.QueryPlan, joinContext *store.Binding) (store.BindingIterator, error) {
+	switch p := plan.(type) {
+	case *optimizer.ScanPlan:
+		return e.createScanIteratorWithJoinContext(p, joinContext)
+	case *optimizer.JoinPlan:
+		return e.createJoinIteratorWithContext(p, joinContext)
+	case *optimizer.FilterPlan:
+		input, err := e.createIteratorWithJoinContext(p.Input, joinContext)
+		if err != nil {
+			return nil, err
+		}
+		return &filterIterator{
+			input:     input,
+			filter:    p.Filter,
+			evaluator: evaluator.NewEvaluator(),
+		}, nil
+	case *optimizer.BindPlan:
+		input, err := e.createIteratorWithJoinContext(p.Input, joinContext)
+		if err != nil {
+			return nil, err
+		}
+		return &bindIterator{
+			input:      input,
+			expression: p.Expression,
+			variable:   p.Variable,
+			evaluator:  evaluator.NewEvaluator(),
+		}, nil
+	default:
+		// For other plan types, delegate to regular createIterator
+		return e.createIterator(plan)
+	}
+}
+
+// createIteratorWithContext creates an iterator with an optional context binding for OPTIONAL patterns
+func (e *Executor) createIteratorWithContext(plan optimizer.QueryPlan, contextBinding *store.Binding) (store.BindingIterator, error) {
+	switch p := plan.(type) {
+	case *optimizer.ScanPlan:
+		// For scans in OPTIONAL context, we don't substitute variables in the pattern
+		// Instead, we let the scan run and then merge bindings in the OPTIONAL iterator
+		return e.createScanIterator(p)
+	case *optimizer.JoinPlan:
+		return e.createJoinIterator(p)
+	case *optimizer.FilterPlan:
+		input, err := e.createIteratorWithContext(p.Input, contextBinding)
+		if err != nil {
+			return nil, err
+		}
+		return &filterIterator{
+			input:          input,
+			filter:         p.Filter,
+			evaluator:      evaluator.NewEvaluator(),
+			contextBinding: contextBinding, // Provide context for filter evaluation
+		}, nil
+	case *optimizer.ProjectionPlan:
+		return e.createProjectionIterator(p)
+	case *optimizer.LimitPlan:
+		return e.createLimitIterator(p)
+	case *optimizer.OffsetPlan:
+		return e.createOffsetIterator(p)
+	case *optimizer.DistinctPlan:
+		return e.createDistinctIterator(p)
+	case *optimizer.ReducedPlan:
+		return e.createReducedIterator(p)
+	case *optimizer.GraphPlan:
+		return e.createGraphIterator(p)
+	case *optimizer.BindPlan:
+		return e.createBindIterator(p)
+	case *optimizer.OptionalPlan:
+		return e.createOptionalIterator(p)
+	case *optimizer.UnionPlan:
+		return e.createUnionIterator(p)
+	case *optimizer.MinusPlan:
+		return e.createMinusIterator(p)
+	case *optimizer.OrderByPlan:
+		return e.createOrderByIterator(p)
+	case *optimizer.EmptyPlan:
+		// EmptyPlan produces a single empty binding
+		return &emptyIterator{}, nil
+	default:
+		return nil, fmt.Errorf("unsupported plan type: %T", plan)
+	}
+}
+
+// createScanIterator creates an iterator for scanning a triple pattern
+func (e *Executor) createScanIterator(plan *optimizer.ScanPlan) (store.BindingIterator, error) {
+	// Convert parser triple pattern to store pattern
+	pattern := &store.Pattern{
+		Subject:   e.convertTermOrVariable(plan.Pattern.Subject),
+		Predicate: e.convertTermOrVariable(plan.Pattern.Predicate),
+		Object:    e.convertTermOrVariable(plan.Pattern.Object),
+	}
+
+	// Execute pattern query
+	quadIter, err := e.store.Query(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	return &scanIterator{
+		quadIter: quadIter,
+		pattern:  plan.Pattern,
+		binding:  store.NewBinding(),
+	}, nil
+}
+
+// createScanIteratorWithJoinContext creates a scan iterator constrained by join context
+// If a variable in the pattern is already bound in joinContext, use that binding
+func (e *Executor) createScanIteratorWithJoinContext(plan *optimizer.ScanPlan, joinContext *store.Binding) (store.BindingIterator, error) {
+	// Convert pattern, substituting variables that are already bound in joinContext
+	pattern := &store.Pattern{
+		Subject:   e.convertTermOrVariableWithContext(plan.Pattern.Subject, joinContext),
+		Predicate: e.convertTermOrVariableWithContext(plan.Pattern.Predicate, joinContext),
+		Object:    e.convertTermOrVariableWithContext(plan.Pattern.Object, joinContext),
+	}
+
+	// Execute pattern query
+	quadIter, err := e.store.Query(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	return &scanIterator{
+		quadIter:    quadIter,
+		pattern:     plan.Pattern,
+		binding:     store.NewBinding(),
+		joinContext: joinContext, // Store context for binding phase
+	}, nil
+}
+
+// convertTermOrVariableWithContext converts a term/variable, using context binding if available
+func (e *Executor) convertTermOrVariableWithContext(tov parser.TermOrVariable, context *store.Binding) any {
+	// Check if this is a variable that's bound in context
+	if tov.IsVariable() {
+		varName := tov.Variable.Name
+		if context != nil {
+			// Check Vars first
+			if value, exists := context.Vars[varName]; exists {
+				// Use the bound value instead of a variable
+				return value
+			}
+			// Also check HiddenVars - these are still bound for pattern matching,
+			// just not visible to BOUND() checks
+			if value, exists := context.HiddenVars[varName]; exists {
+				// Use the bound value from HiddenVars
+				return value
+			}
+		}
+		return store.NewVariable(varName)
+	}
+
+	// Handle blank nodes as variables (check context too)
+	if blankNode, ok := tov.Term.(*rdf.BlankNode); ok {
+		varName := "_:" + blankNode.ID
+		if context != nil {
+			if value, exists := context.Vars[varName]; exists {
+				// Use the bound value
+				return value
+			}
+			// Also check HiddenVars
+			if value, exists := context.HiddenVars[varName]; exists {
+				return value
+			}
+		}
+		return store.NewVariable(varName)
+	}
+
+	return tov.Term
+}
+
+// createJoinIterator creates an iterator for join operations
+func (e *Executor) createJoinIterator(plan *optimizer.JoinPlan) (store.BindingIterator, error) {
+	left, err := e.createIterator(plan.Left)
+	if err != nil {
+		return nil, err
+	}
+
+	switch plan.Type {
+	case optimizer.JoinTypeNestedLoop:
+		return &nestedLoopJoinIterator{
+			left:         left,
+			rightPlan:    plan.Right,
+			executor:     e,
+			currentLeft:  nil,
+			currentRight: nil,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported join type: %v", plan.Type)
+	}
+}
+
+// createJoinIteratorWithContext creates a join iterator with existing join context
+func (e *Executor) createJoinIteratorWithContext(plan *optimizer.JoinPlan, joinContext *store.Binding) (store.BindingIterator, error) {
+	// Create left iterator with join context
+	left, err := e.createIteratorWithJoinContext(plan.Left, joinContext)
+	if err != nil {
+		return nil, err
+	}
+
+	switch plan.Type {
+	case optimizer.JoinTypeNestedLoop:
+		return &nestedLoopJoinIterator{
+			left:         left,
+			rightPlan:    plan.Right,
+			executor:     e,
+			currentLeft:  nil,
+			currentRight: nil,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported join type: %v", plan.Type)
+	}
+}
+
+// createProjectionIterator creates an iterator for projection operations
+func (e *Executor) createProjectionIterator(plan *optimizer.ProjectionPlan) (store.BindingIterator, error) {
+	input, err := e.createIterator(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	return &projectionIterator{
+		input:     input,
+		variables: plan.Variables,
+	}, nil
+}
+
+// createLimitIterator creates an iterator for LIMIT operations
+func (e *Executor) createLimitIterator(plan *optimizer.LimitPlan) (store.BindingIterator, error) {
+	input, err := e.createIterator(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	return &limitIterator{
+		input: input,
+		limit: plan.Limit,
+		count: 0,
+	}, nil
+}
+
+// createOffsetIterator creates an iterator for OFFSET operations
+func (e *Executor) createOffsetIterator(plan *optimizer.OffsetPlan) (store.BindingIterator, error) {
+	input, err := e.createIterator(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	return &offsetIterator{
+		input:   input,
+		offset:  plan.Offset,
+		skipped: 0,
+	}, nil
+}
+
+// createDistinctIterator creates an iterator for DISTINCT operations
+func (e *Executor) createDistinctIterator(plan *optimizer.DistinctPlan) (store.BindingIterator, error) {
+	input, err := e.createIterator(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	return &distinctIterator{
+		input: input,
+		seen:  make(map[string]bool),
+	}, nil
+}
+
+func (e *Executor) createReducedIterator(plan *optimizer.ReducedPlan) (store.BindingIterator, error) {
+	// Per SPARQL 1.1 spec, REDUCED is a hint that duplicates MAY be removed
+	// but are not required to be removed. For simplicity and test compatibility,
+	// we just pass through without removing duplicates.
+	return e.createIterator(plan.Input)
+}
+
+// convertTermOrVariable converts a parser term/variable to store format
+func (e *Executor) convertTermOrVariable(tov parser.TermOrVariable) any {
+	if tov.IsVariable() {
+		return store.NewVariable(tov.Variable.Name)
+	}
+	// Blank nodes in query patterns act as non-distinguished variables
+	// Per SPARQL spec, blank node labels in patterns are treated as variables
+	// Anonymous blank nodes from [] and labeled blank nodes _:label both match any value
+	if blankNode, ok := tov.Term.(*rdf.BlankNode); ok {
+		return store.NewVariable("_:" + blankNode.ID)
+	}
+	return tov.Term
+}
+
+// scanIterator implements BindingIterator for scanning
+type scanIterator struct {
+	quadIter    store.QuadIterator
+	pattern     *parser.TriplePattern
+	binding     *store.Binding
+	joinContext *store.Binding // Optional: variables bound from left side of join
+}
+
+func (it *scanIterator) Next() bool {
+	for {
+		if !it.quadIter.Next() {
+			return false
+		}
+
+		quad, err := it.quadIter.Quad()
+		if err != nil {
+			return false
+		}
+
+		// Bind variables, checking for repeated variables
+		it.binding = store.NewBinding()
+		valid := true
+
+		// Bind subject
+		if it.pattern.Subject.IsVariable() {
+			varName := it.pattern.Subject.Variable.Name
+			it.binding.Vars[varName] = quad.Subject
+		} else if bn, ok := it.pattern.Subject.Term.(*rdf.BlankNode); ok {
+			// Blank nodes in patterns act like variables
+			varName := "_:" + bn.ID
+			it.binding.Vars[varName] = quad.Subject
+		}
+
+		// Bind predicate (check if variable already bound from subject)
+		if it.pattern.Predicate.IsVariable() {
+			varName := it.pattern.Predicate.Variable.Name
+			if existingValue, exists := it.binding.Vars[varName]; exists {
+				// Variable already bound - check if values match
+				if !existingValue.Equals(quad.Predicate) {
+					valid = false
+				}
+			} else {
+				it.binding.Vars[varName] = quad.Predicate
+			}
+		} else if bn, ok := it.pattern.Predicate.Term.(*rdf.BlankNode); ok {
+			varName := "_:" + bn.ID
+			if existingValue, exists := it.binding.Vars[varName]; exists {
+				if !existingValue.Equals(quad.Predicate) {
+					valid = false
+				}
+			} else {
+				it.binding.Vars[varName] = quad.Predicate
+			}
+		}
+
+		// Bind object (check if variable already bound from subject or predicate)
+		if valid && it.pattern.Object.IsVariable() {
+			varName := it.pattern.Object.Variable.Name
+			if existingValue, exists := it.binding.Vars[varName]; exists {
+				// Variable already bound - check if values match
+				if !existingValue.Equals(quad.Object) {
+					valid = false
+				}
+			} else {
+				it.binding.Vars[varName] = quad.Object
+			}
+		} else if valid {
+			if bn, ok := it.pattern.Object.Term.(*rdf.BlankNode); ok {
+				varName := "_:" + bn.ID
+				if existingValue, exists := it.binding.Vars[varName]; exists {
+					if !existingValue.Equals(quad.Object) {
+						valid = false
+					}
+				} else {
+					it.binding.Vars[varName] = quad.Object
+				}
+			}
+		}
+
+		// If all variable constraints are satisfied, return this binding
+		if valid {
+			return true
+		}
+		// Otherwise, continue to next quad
+	}
+}
+
+func (it *scanIterator) Binding() *store.Binding {
+	return it.binding
+}
+
+func (it *scanIterator) Close() error {
+	return it.quadIter.Close()
+}
+
+// nestedLoopJoinIterator implements nested loop join
+type nestedLoopJoinIterator struct {
+	left         store.BindingIterator
+	rightPlan    optimizer.QueryPlan
+	executor     *Executor
+	currentLeft  *store.Binding
+	currentRight store.BindingIterator
+	result       *store.Binding
+}
+
+func (it *nestedLoopJoinIterator) Next() bool {
+	for {
+		// If we have a right iterator, try to get next from it
+		if it.currentRight != nil {
+			if it.currentRight.Next() {
+				rightBinding := it.currentRight.Binding()
+
+				// Merge bindings
+				merged := it.mergeBindings(it.currentLeft, rightBinding)
+				if merged != nil {
+					it.result = merged
+					return true
+				}
+				continue
+			}
+			// Right exhausted, close it
+			_ = it.currentRight.Close() // #nosec G104 - close error doesn't affect iteration logic
+			it.currentRight = nil
+		}
+
+		// Get next from left
+		if !it.left.Next() {
+			return false
+		}
+
+		it.currentLeft = it.left.Binding()
+
+		// Create new right iterator with left binding as context
+		// This allows the right side to use variable bindings from the left
+		rightIter, err := it.executor.createIteratorWithJoinContext(it.rightPlan, it.currentLeft)
+		if err != nil {
+			return false
+		}
+		it.currentRight = rightIter
+	}
+}
+
+func (it *nestedLoopJoinIterator) Binding() *store.Binding {
+	return it.result
+}
+
+func (it *nestedLoopJoinIterator) Close() error {
+	if it.currentRight != nil {
+		_ = it.currentRight.Close() // #nosec G104 - right close error less critical than left close error
+	}
+	return it.left.Close()
+}
+
+// mergeBindings merges two bindings, returns nil if incompatible
+func (it *nestedLoopJoinIterator) mergeBindings(left, right *store.Binding) *store.Binding {
+	result := left.Clone()
+
+	for varName, term := range right.Vars {
+		if existingTerm, exists := result.Vars[varName]; exists {
+			// Check compatibility
+			if !existingTerm.Equals(term) {
+				return nil
+			}
+		} else {
+			result.Vars[varName] = term
+		}
+	}
+
+	return result
+}
+
+// filterIterator implements filter operations
+type filterIterator struct {
+	input          store.BindingIterator
+	filter         *parser.Filter
+	evaluator      *evaluator.Evaluator
+	contextBinding *store.Binding // Optional: provides variables from outer scope (for OPTIONAL)
+}
+
+func (it *filterIterator) Next() bool {
+	for it.input.Next() {
+		binding := it.input.Binding()
+
+		// If no expression, pass through (shouldn't happen)
+		if it.filter.Expression == nil {
+			return true
+		}
+
+		// Merge with context binding if present (for OPTIONAL patterns)
+		evalBinding := binding
+		if it.contextBinding != nil {
+			merged := it.contextBinding.Clone()
+			for varName, term := range binding.Vars {
+				merged.Vars[varName] = term
+			}
+			evalBinding = merged
+		}
+
+		// Evaluate the filter expression
+		result, err := it.evaluator.Evaluate(it.filter.Expression, evalBinding)
+		if err != nil {
+			// Expression evaluation error - filter out this binding
+			continue
+		}
+
+		// Check effective boolean value
+		ebv, err := it.evaluator.EffectiveBooleanValue(result)
+		if err != nil {
+			// Cannot compute EBV - filter out this binding
+			continue
+		}
+
+		// Keep binding if EBV is true
+		if ebv {
+			return true
+		}
+
+		// EBV is false - continue to next binding
+	}
+	return false
+}
+
+func (it *filterIterator) Binding() *store.Binding {
+	return it.input.Binding()
+}
+
+func (it *filterIterator) Close() error {
+	return it.input.Close()
+}
+
+// projectionIterator implements projection operations
+type projectionIterator struct {
+	input     store.BindingIterator
+	variables []*parser.Variable
+}
+
+func (it *projectionIterator) Next() bool {
+	return it.input.Next()
+}
+
+func (it *projectionIterator) Binding() *store.Binding {
+	if it.variables == nil {
+		// SELECT *
+		return it.input.Binding()
+	}
+
+	// Project only selected variables
+	binding := store.NewBinding()
+	inputBinding := it.input.Binding()
+
+	for _, variable := range it.variables {
+		if term, exists := inputBinding.Vars[variable.Name]; exists {
+			binding.Vars[variable.Name] = term
+		}
+	}
+
+	return binding
+}
+
+func (it *projectionIterator) Close() error {
+	return it.input.Close()
+}
+
+// limitIterator implements LIMIT operations
+type limitIterator struct {
+	input store.BindingIterator
+	limit int
+	count int
+}
+
+func (it *limitIterator) Next() bool {
+	if it.count >= it.limit {
+		return false
+	}
+
+	if it.input.Next() {
+		it.count++
+		return true
+	}
+
+	return false
+}
+
+func (it *limitIterator) Binding() *store.Binding {
+	return it.input.Binding()
+}
+
+func (it *limitIterator) Close() error {
+	return it.input.Close()
+}
+
+// offsetIterator implements OFFSET operations
+type offsetIterator struct {
+	input   store.BindingIterator
+	offset  int
+	skipped int
+}
+
+func (it *offsetIterator) Next() bool {
+	// Skip initial rows
+	for it.skipped < it.offset {
+		if !it.input.Next() {
+			return false
+		}
+		it.skipped++
+	}
+
+	return it.input.Next()
+}
+
+func (it *offsetIterator) Binding() *store.Binding {
+	return it.input.Binding()
+}
+
+func (it *offsetIterator) Close() error {
+	return it.input.Close()
+}
+
+// createGraphIterator creates an iterator for a GRAPH pattern
+func (e *Executor) createGraphIterator(plan *optimizer.GraphPlan) (store.BindingIterator, error) {
+	// The GRAPH pattern wraps the inner plan and constrains all scans to a specific graph
+	// We need to wrap this by creating a modified executor that adds graph constraints
+
+	// Create a graph-aware executor wrapper
+	graphExec := &graphExecutor{
+		base:  e,
+		graph: plan.Graph,
+	}
+
+	// Execute the inner plan with the graph constraint
+	innerIter, err := graphExec.createIterator(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap with iterator that promotes graph variable from HiddenVars to Vars
+	// This makes the graph variable visible outside the GRAPH pattern but not inside
+	return &graphPromotionIterator{
+		inner:     innerIter,
+		graphTerm: plan.Graph,
+	}, nil
+}
+
+// graphPromotionIterator promotes graph variable from HiddenVars to Vars
+// This makes the graph variable visible outside the GRAPH pattern but not inside
+type graphPromotionIterator struct {
+	inner     store.BindingIterator
+	graphTerm *parser.GraphTerm
+	binding   *store.Binding
+}
+
+func (it *graphPromotionIterator) Next() bool {
+	if !it.inner.Next() {
+		return false
+	}
+
+	// Clone the inner binding and promote graph variable
+	innerBinding := it.inner.Binding()
+	it.binding = innerBinding.Clone()
+
+	// Move graph variable from HiddenVars to Vars
+	if it.graphTerm != nil && it.graphTerm.Variable != nil {
+		varName := it.graphTerm.Variable.Name
+		if graphValue, exists := it.binding.HiddenVars[varName]; exists {
+			it.binding.Vars[varName] = graphValue
+			delete(it.binding.HiddenVars, varName)
+		}
+	}
+
+	return true
+}
+
+func (it *graphPromotionIterator) Binding() *store.Binding {
+	return it.binding
+}
+
+func (it *graphPromotionIterator) Close() error {
+	return it.inner.Close()
+}
+
+// graphExecutor wraps an executor and adds graph constraints to all scans
+type graphExecutor struct {
+	base           *Executor
+	graph          *parser.GraphTerm
+	contextBinding *store.Binding // Optional: variables from outer scope (e.g., from left side of join)
+}
+
+func (ge *graphExecutor) createIterator(plan optimizer.QueryPlan) (store.BindingIterator, error) {
+	switch p := plan.(type) {
+	case *optimizer.ScanPlan:
+		return ge.createGraphScanIterator(p)
+	case *optimizer.JoinPlan:
+		// For joins, create an iterator with graph-constrained left side
+		// The right side will be created on-demand during iteration
+		left, err := ge.createIterator(p.Left)
+		if err != nil {
+			return nil, err
+		}
+		// Create a join iterator that uses the graph executor for right side too
+		return &graphJoinIterator{
+			left:      left,
+			rightPlan: p.Right,
+			graphExec: ge,
+		}, nil
+	case *optimizer.EmptyPlan:
+		// For empty GRAPH patterns like GRAPH ?g {} or GRAPH <uri> {}
+		// We need to enumerate graphs or check existence
+		return ge.createEmptyGraphIterator()
+	case *optimizer.FilterPlan:
+		// For filters inside GRAPH patterns, apply filter to graph-constrained input
+		input, err := ge.createIterator(p.Input)
+		if err != nil {
+			return nil, err
+		}
+		return &filterIterator{
+			input:     input,
+			filter:    p.Filter,
+			evaluator: evaluator.NewEvaluator(),
+		}, nil
+	case *optimizer.OptionalPlan:
+		// For OPTIONAL inside GRAPH patterns, both sides need graph constraints
+		left, err := ge.createIterator(p.Left)
+		if err != nil {
+			return nil, err
+		}
+		// Create an OPTIONAL iterator where right side also uses graph executor
+		return &graphOptionalIterator{
+			left:      left,
+			rightPlan: p.Right,
+			graphExec: ge,
+		}, nil
+	default:
+		// For other operators, delegate to base executor
+		return ge.base.createIterator(plan)
+	}
+}
+
+func (ge *graphExecutor) createGraphScanIterator(plan *optimizer.ScanPlan) (store.BindingIterator, error) {
+	// Convert parser triple pattern to store pattern with graph constraint
+	// Use context binding if available to substitute bound variables (including HiddenVars)
+	pattern := &store.Pattern{
+		Subject:   ge.base.convertTermOrVariableWithContext(plan.Pattern.Subject, ge.contextBinding),
+		Predicate: ge.base.convertTermOrVariableWithContext(plan.Pattern.Predicate, ge.contextBinding),
+		Object:    ge.base.convertTermOrVariableWithContext(plan.Pattern.Object, ge.contextBinding),
+		Graph:     ge.convertGraphTerm(ge.graph),
+	}
+
+	// Execute pattern query
+	quadIter, err := ge.base.store.Query(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a graph-aware scan iterator that also binds the graph variable
+	return &graphScanIterator{
+		quadIter:  quadIter,
+		pattern:   plan.Pattern,
+		graphTerm: ge.graph,
+		binding:   store.NewBinding(),
+	}, nil
+}
+
+func (ge *graphExecutor) convertGraphTerm(graphTerm *parser.GraphTerm) any {
+	if graphTerm.Variable != nil {
+		return &store.Variable{Name: graphTerm.Variable.Name}
+	}
+	return graphTerm.IRI
+}
+
+// createEmptyGraphIterator handles empty GRAPH patterns like GRAPH ?g {} or GRAPH <uri> {}
+func (ge *graphExecutor) createEmptyGraphIterator() (store.BindingIterator, error) {
+	if ge.graph.Variable != nil {
+		// GRAPH ?g {} - enumerate all named graphs
+		// Query for all quads and extract unique graph names
+		pattern := &store.Pattern{
+			Subject:   &store.Variable{Name: "_s"},
+			Predicate: &store.Variable{Name: "_p"},
+			Object:    &store.Variable{Name: "_o"},
+			Graph:     &store.Variable{Name: ge.graph.Variable.Name},
+		}
+
+		quadIter, err := ge.base.store.Query(pattern)
+		if err != nil {
+			return nil, err
+		}
+
+		return &emptyGraphEnumerator{
+			quadIter:     quadIter,
+			graphVarName: ge.graph.Variable.Name,
+			seenGraphs:   make(map[string]bool),
+		}, nil
+	} else {
+		// GRAPH <uri> {} - check if the graph exists
+		// Query for any quad in the specified graph
+		pattern := &store.Pattern{
+			Subject:   &store.Variable{Name: "_s"},
+			Predicate: &store.Variable{Name: "_p"},
+			Object:    &store.Variable{Name: "_o"},
+			Graph:     ge.graph.IRI,
+		}
+
+		quadIter, err := ge.base.store.Query(pattern)
+		if err != nil {
+			return nil, err
+		}
+
+		// Check if at least one quad exists
+		exists := quadIter.Next()
+		_ = quadIter.Close() // Best effort close
+
+		if exists {
+			// Return a single empty binding
+			return &emptyIterator{}, nil
+		} else {
+			// Return no bindings
+			return &noBindingsIterator{}, nil
+		}
+	}
+}
+
+// graphJoinIterator implements nested loop join for GRAPH patterns
+type graphJoinIterator struct {
+	left         store.BindingIterator
+	rightPlan    optimizer.QueryPlan
+	graphExec    *graphExecutor
+	currentLeft  *store.Binding
+	currentRight store.BindingIterator
+	result       *store.Binding
+}
+
+func (it *graphJoinIterator) Next() bool {
+	for {
+		// If we have a right iterator, try to get next from it
+		if it.currentRight != nil {
+			if it.currentRight.Next() {
+				rightBinding := it.currentRight.Binding()
+
+				// Merge bindings
+				merged := it.mergeBindings(it.currentLeft, rightBinding)
+				if merged != nil {
+					it.result = merged
+					return true
+				}
+				continue
+			}
+			// Right exhausted, close it
+			_ = it.currentRight.Close() // #nosec G104 - close error doesn't affect iteration logic
+			it.currentRight = nil
+		}
+
+		// Get next from left
+		if !it.left.Next() {
+			return false
+		}
+
+		it.currentLeft = it.left.Binding()
+
+		// Create new right iterator using graph executor (with graph constraints)
+		// Pass the left binding as context so variables (including HiddenVars) can be substituted
+		execWithContext := &graphExecutor{
+			base:           it.graphExec.base,
+			graph:          it.graphExec.graph,
+			contextBinding: it.currentLeft,
+		}
+		rightIter, err := execWithContext.createIterator(it.rightPlan)
+		if err != nil {
+			return false
+		}
+		it.currentRight = rightIter
+	}
+}
+
+func (it *graphJoinIterator) Binding() *store.Binding {
+	return it.result
+}
+
+func (it *graphJoinIterator) Close() error {
+	if it.currentRight != nil {
+		_ = it.currentRight.Close() // #nosec G104 - right close error less critical than left close error
+	}
+	return it.left.Close()
+}
+
+// mergeBindings merges two bindings, returns nil if incompatible
+func (it *graphJoinIterator) mergeBindings(left, right *store.Binding) *store.Binding {
+	result := left.Clone()
+
+	for varName, term := range right.Vars {
+		if existingTerm, exists := result.Vars[varName]; exists {
+			// Check compatibility
+			if !existingTerm.Equals(term) {
+				return nil
+			}
+		} else {
+			result.Vars[varName] = term
+		}
+	}
+
+	return result
+}
+
+// graphOptionalIterator implements OPTIONAL patterns inside GRAPH (left outer join with graph constraints)
+type graphOptionalIterator struct {
+	left         store.BindingIterator
+	rightPlan    optimizer.QueryPlan
+	graphExec    *graphExecutor
+	currentLeft  *store.Binding
+	currentRight store.BindingIterator
+	result       *store.Binding
+	hasMatch     bool
+}
+
+func (it *graphOptionalIterator) Next() bool {
+	for {
+		// If we have a right iterator, try to get next from it
+		if it.currentRight != nil {
+			if it.currentRight.Next() {
+				rightBinding := it.currentRight.Binding()
+
+				// Try to merge bindings
+				merged := it.mergeBindings(it.currentLeft, rightBinding)
+				if merged != nil {
+					it.hasMatch = true
+					it.result = merged
+					return true
+				}
+				continue
+			}
+			// Right exhausted
+			_ = it.currentRight.Close() // #nosec G104 - close error doesn't affect iteration logic
+			it.currentRight = nil
+
+			// If no match was found, return the left binding alone (OPTIONAL semantics)
+			if !it.hasMatch {
+				it.result = it.currentLeft
+				return true
+			}
+		}
+
+		// Get next from left
+		if !it.left.Next() {
+			return false
+		}
+
+		it.currentLeft = it.left.Binding()
+		it.hasMatch = false
+
+		// Create new right iterator using graph executor (with graph constraints)
+		// Create context binding for OPTIONAL right side
+		// Graph variables must be visible for constraint matching, but stay hidden from SELECT results
+		// Copy both Vars AND HiddenVars so the right side can see graph variable bindings
+		contextBinding := &store.Binding{
+			Vars:       it.currentLeft.Vars,
+			HiddenVars: make(map[string]rdf.Term),
+		}
+		// Copy HiddenVars from left to context so graph variable constraints are preserved
+		for varName, term := range it.currentLeft.HiddenVars {
+			contextBinding.HiddenVars[varName] = term
+		}
+		execWithContext := &graphExecutor{
+			base:           it.graphExec.base,
+			graph:          it.graphExec.graph,
+			contextBinding: contextBinding,
+		}
+		rightIter, err := execWithContext.createIterator(it.rightPlan)
+		if err != nil {
+			// If right fails, still return left binding (OPTIONAL semantics)
+			it.result = it.currentLeft
+			return true
+		}
+		it.currentRight = rightIter
+	}
+}
+
+func (it *graphOptionalIterator) Binding() *store.Binding {
+	return it.result
+}
+
+func (it *graphOptionalIterator) Close() error {
+	if it.currentRight != nil {
+		_ = it.currentRight.Close() // #nosec G104 - right close error less critical than left close error
+	}
+	return it.left.Close()
+}
+
+// mergeBindings merges two bindings, returns nil if incompatible
+func (it *graphOptionalIterator) mergeBindings(left, right *store.Binding) *store.Binding {
+	result := left.Clone()
+
+	for varName, term := range right.Vars {
+		// Check if variable already exists in result Vars
+		if existingTerm, exists := result.Vars[varName]; exists {
+			// Check compatibility
+			if !existingTerm.Equals(term) {
+				return nil
+			}
+			// Variable already in Vars and compatible, skip
+			continue
+		}
+
+		// Check if variable exists in result HiddenVars
+		if hiddenTerm, exists := result.HiddenVars[varName]; exists {
+			// Variable is in HiddenVars - validate compatibility but DON'T promote to Vars
+			// The graphPromotionIterator will handle promotion later
+			if !hiddenTerm.Equals(term) {
+				return nil
+			}
+			// Compatible but keep it hidden, don't add to Vars
+			continue
+		}
+
+		// Variable doesn't exist in either Vars or HiddenVars, add to Vars
+		result.Vars[varName] = term
+	}
+
+	return result
+}
+
+// graphScanIterator is a scanIterator that also binds the graph variable
+type graphScanIterator struct {
+	quadIter  store.QuadIterator
+	pattern   *parser.TriplePattern
+	graphTerm *parser.GraphTerm
+	binding   *store.Binding
+}
+
+func (it *graphScanIterator) Next() bool {
+	for {
+		if !it.quadIter.Next() {
+			return false
+		}
+
+		quad, err := it.quadIter.Quad()
+		if err != nil {
+			return false
+		}
+
+		// Bind variables, checking for repeated variables
+		it.binding = store.NewBinding()
+		valid := true
+
+		// Bind subject
+		if it.pattern.Subject.IsVariable() {
+			varName := it.pattern.Subject.Variable.Name
+			it.binding.Vars[varName] = quad.Subject
+		} else if bn, ok := it.pattern.Subject.Term.(*rdf.BlankNode); ok {
+			// Blank nodes in patterns act like variables
+			varName := "_:" + bn.ID
+			it.binding.Vars[varName] = quad.Subject
+		}
+
+		// Bind predicate (check if variable already bound from subject)
+		if it.pattern.Predicate.IsVariable() {
+			varName := it.pattern.Predicate.Variable.Name
+			if existingValue, exists := it.binding.Vars[varName]; exists {
+				// Variable already bound - check if values match
+				if !existingValue.Equals(quad.Predicate) {
+					valid = false
+				}
+			} else {
+				it.binding.Vars[varName] = quad.Predicate
+			}
+		} else if bn, ok := it.pattern.Predicate.Term.(*rdf.BlankNode); ok {
+			varName := "_:" + bn.ID
+			if existingValue, exists := it.binding.Vars[varName]; exists {
+				if !existingValue.Equals(quad.Predicate) {
+					valid = false
+				}
+			} else {
+				it.binding.Vars[varName] = quad.Predicate
+			}
+		}
+
+		// Bind object (check if variable already bound from subject or predicate)
+		if valid && it.pattern.Object.IsVariable() {
+			varName := it.pattern.Object.Variable.Name
+			if existingValue, exists := it.binding.Vars[varName]; exists {
+				// Variable already bound - check if values match
+				if !existingValue.Equals(quad.Object) {
+					valid = false
+				}
+			} else {
+				it.binding.Vars[varName] = quad.Object
+			}
+		} else if valid {
+			if bn, ok := it.pattern.Object.Term.(*rdf.BlankNode); ok {
+				varName := "_:" + bn.ID
+				if existingValue, exists := it.binding.Vars[varName]; exists {
+					if !existingValue.Equals(quad.Object) {
+						valid = false
+					}
+				} else {
+					it.binding.Vars[varName] = quad.Object
+				}
+			}
+		}
+
+		// Bind graph variable if the GRAPH pattern uses a variable
+		// Use HiddenVars so it's not visible to BOUND() inside the GRAPH pattern
+		if valid && it.graphTerm != nil && it.graphTerm.Variable != nil {
+			varName := it.graphTerm.Variable.Name
+			if quad.Graph != nil {
+				// Skip default graph quads when GRAPH uses a variable
+				// GRAPH ?g means "match any NAMED graph", not the default graph
+				if quad.Graph.Type() == rdf.TermTypeDefaultGraph {
+					valid = false
+				} else if existingValue, exists := it.binding.HiddenVars[varName]; exists {
+					// Variable already bound - check if values match
+					if !existingValue.Equals(quad.Graph) {
+						valid = false
+					}
+				} else {
+					// Bind to HiddenVars, not Vars, so BOUND(?g) returns false inside pattern
+					it.binding.HiddenVars[varName] = quad.Graph
+
+					// CRITICAL: Check if graph variable is also used in S/P/O positions
+					// For queries like: GRAPH ?g { ?g :p ?o }
+					// The graph variable must match the subject/predicate/object value
+					if it.pattern.Subject.IsVariable() && it.pattern.Subject.Variable.Name == varName {
+						if !quad.Graph.Equals(quad.Subject) {
+							valid = false
+						}
+					}
+					if valid && it.pattern.Predicate.IsVariable() && it.pattern.Predicate.Variable.Name == varName {
+						if !quad.Graph.Equals(quad.Predicate) {
+							valid = false
+						}
+					}
+					if valid && it.pattern.Object.IsVariable() && it.pattern.Object.Variable.Name == varName {
+						if !quad.Graph.Equals(quad.Object) {
+							valid = false
+						}
+					}
+				}
+			}
+		}
+
+		// If all variable constraints are satisfied, return this binding
+		if valid {
+			return true
+		}
+		// Otherwise, continue to next quad
+	}
+}
+
+func (it *graphScanIterator) Binding() *store.Binding {
+	return it.binding
+}
+
+func (it *graphScanIterator) Close() error {
+	return it.quadIter.Close()
+}
+
+// distinctIterator implements DISTINCT operations
+type distinctIterator struct {
+	input store.BindingIterator
+	seen  map[string]bool
+}
+
+func (it *distinctIterator) Next() bool {
+	for it.input.Next() {
+		binding := it.input.Binding()
+		key := it.bindingKey(binding)
+
+		if !it.seen[key] {
+			it.seen[key] = true
+			return true
+		}
+	}
+	return false
+}
+
+func (it *distinctIterator) Binding() *store.Binding {
+	return it.input.Binding()
+}
+
+func (it *distinctIterator) Close() error {
+	return it.input.Close()
+}
+
+// bindingKey creates a unique key for a binding
+// Uses the same termSignature logic as bindingSignature for consistency
+func (it *distinctIterator) bindingKey(binding *store.Binding) string {
+	// Use the shared bindingSignature function to ensure consistency
+	// with post-execution DISTINCT logic
+	return bindingSignature(binding)
+}
+
+// createBindIterator creates an iterator for BIND operations
+func (e *Executor) createBindIterator(plan *optimizer.BindPlan) (store.BindingIterator, error) {
+	input, err := e.createIterator(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	return &bindIterator{
+		input:      input,
+		expression: plan.Expression,
+		variable:   plan.Variable,
+		evaluator:  evaluator.NewEvaluator(),
+	}, nil
+}
+
+// bindIterator implements BIND operations (variable assignment)
+type bindIterator struct {
+	input      store.BindingIterator
+	expression parser.Expression
+	variable   *parser.Variable
+	evaluator  *evaluator.Evaluator
+}
+
+func (it *bindIterator) Next() bool {
+	return it.input.Next()
+}
+
+func (it *bindIterator) Binding() *store.Binding {
+	inputBinding := it.input.Binding()
+
+	// Evaluate the expression
+	result, err := it.evaluator.Evaluate(it.expression, inputBinding)
+	if err != nil {
+		// If evaluation fails, skip this binding by continuing without adding the variable
+		// In SPARQL, BIND failures cause the solution to be dropped
+		// However, we can't drop it here (we're in Binding() not Next())
+		// So we return the input binding unchanged
+		// TODO: Consider adding error handling in Next() instead
+		return inputBinding
+	}
+
+	// Clone the input binding to avoid modifying it
+	extendedBinding := inputBinding.Clone()
+
+	// Add the result to the extended binding
+	extendedBinding.Vars[it.variable.Name] = result
+
+	return extendedBinding
+}
+
+func (it *bindIterator) Close() error {
+	return it.input.Close()
+}
+
+// createOptionalIterator creates an iterator for OPTIONAL operations (left outer join)
+func (e *Executor) createOptionalIterator(plan *optimizer.OptionalPlan) (store.BindingIterator, error) {
+	left, err := e.createIterator(plan.Left)
+	if err != nil {
+		return nil, err
+	}
+
+	return &optionalIterator{
+		left:         left,
+		rightPlan:    plan.Right,
+		executor:     e,
+		currentLeft:  nil,
+		currentRight: nil,
+		hasMatch:     false,
+	}, nil
+}
+
+// optionalIterator implements OPTIONAL patterns (left outer join)
+type optionalIterator struct {
+	left         store.BindingIterator
+	rightPlan    optimizer.QueryPlan
+	executor     *Executor
+	currentLeft  *store.Binding
+	currentRight store.BindingIterator
+	result       *store.Binding
+	hasMatch     bool
+}
+
+func (it *optionalIterator) Next() bool {
+	for {
+		// If we have a right iterator, try to get next from it
+		if it.currentRight != nil {
+			if it.currentRight.Next() {
+				rightBinding := it.currentRight.Binding()
+
+				// Try to merge bindings
+				merged := it.mergeBindings(it.currentLeft, rightBinding)
+				if merged != nil {
+					it.hasMatch = true
+					it.result = merged
+					return true
+				}
+				continue
+			}
+			// Right exhausted
+			_ = it.currentRight.Close() // #nosec G104 - close error doesn't affect iteration logic
+			it.currentRight = nil
+
+			// If no match was found, return the left binding alone
+			if !it.hasMatch {
+				it.result = it.currentLeft
+				return true
+			}
+		}
+
+		// Get next from left
+		if !it.left.Next() {
+			return false
+		}
+
+		it.currentLeft = it.left.Binding()
+		it.hasMatch = false
+
+		// Create new right iterator with context binding from left side
+		// This allows FILTERs in the OPTIONAL to access outer variables
+		rightIter, err := it.executor.createIteratorWithContext(it.rightPlan, it.currentLeft)
+		if err != nil {
+			// If right fails, still return left binding (OPTIONAL semantics)
+			it.result = it.currentLeft
+			return true
+		}
+		it.currentRight = rightIter
+	}
+}
+
+func (it *optionalIterator) Binding() *store.Binding {
+	return it.result
+}
+
+func (it *optionalIterator) Close() error {
+	if it.currentRight != nil {
+		_ = it.currentRight.Close() // #nosec G104 - right close error less critical than left close error
+	}
+	return it.left.Close()
+}
+
+// mergeBindings merges two bindings, returns nil if incompatible
+func (it *optionalIterator) mergeBindings(left, right *store.Binding) *store.Binding {
+	result := left.Clone()
+
+	for varName, term := range right.Vars {
+		if existingTerm, exists := result.Vars[varName]; exists {
+			// Check compatibility
+			if !existingTerm.Equals(term) {
+				return nil
+			}
+		} else {
+			result.Vars[varName] = term
+		}
+	}
+
+	return result
+}
+
+// createUnionIterator creates an iterator for UNION operations (alternation)
+func (e *Executor) createUnionIterator(plan *optimizer.UnionPlan) (store.BindingIterator, error) {
+	left, err := e.createIterator(plan.Left)
+	if err != nil {
+		return nil, err
+	}
+
+	right, err := e.createIterator(plan.Right)
+	if err != nil {
+		_ = left.Close() // #nosec G104 - cleanup on error
+		return nil, err
+	}
+
+	// fmt.Fprintf(os.Stderr, "DEBUG: Creating UNION iterator\n")
+	return &unionIterator{
+		left:     left,
+		right:    right,
+		leftDone: false,
+	}, nil
+}
+
+// unionIterator implements UNION patterns (alternation)
+type unionIterator struct {
+	left     store.BindingIterator
+	right    store.BindingIterator
+	leftDone bool
+}
+
+func (it *unionIterator) Next() bool {
+	// First exhaust the left side
+	if !it.leftDone {
+		if it.left.Next() {
+			return true
+		}
+		it.leftDone = true
+	}
+
+	// Then process the right side
+	return it.right.Next()
+}
+
+func (it *unionIterator) Binding() *store.Binding {
+	if !it.leftDone {
+		return it.left.Binding()
+	}
+	return it.right.Binding()
+}
+
+func (it *unionIterator) Close() error {
+	_ = it.left.Close() // #nosec G104 - left close error less critical than right close error
+	return it.right.Close()
+}
+
+// createMinusIterator creates an iterator for MINUS operations (set difference)
+func (e *Executor) createMinusIterator(plan *optimizer.MinusPlan) (store.BindingIterator, error) {
+	left, err := e.createIterator(plan.Left)
+	if err != nil {
+		return nil, err
+	}
+
+	return &minusIterator{
+		left:      left,
+		rightPlan: plan.Right,
+		executor:  e,
+	}, nil
+}
+
+// minusIterator implements MINUS patterns (set difference)
+type minusIterator struct {
+	left      store.BindingIterator
+	rightPlan optimizer.QueryPlan
+	executor  *Executor
+}
+
+func (it *minusIterator) Next() bool {
+	for it.left.Next() {
+		leftBinding := it.left.Binding()
+
+		// Check if this binding is compatible with any right binding
+		rightIter, err := it.executor.createIterator(it.rightPlan)
+		if err != nil {
+			// If right fails, return left binding (MINUS semantics)
+			return true
+		}
+
+		hasMatch := false
+		for rightIter.Next() {
+			rightBinding := rightIter.Binding()
+
+			// Check if bindings are compatible (share common variables with same values)
+			if it.isCompatible(leftBinding, rightBinding) {
+				hasMatch = true
+				break
+			}
+		}
+		_ = rightIter.Close() // #nosec G104 - close error doesn't affect iteration logic
+
+		// Only return the binding if there was no match (MINUS semantics)
+		if !hasMatch {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (it *minusIterator) Binding() *store.Binding {
+	return it.left.Binding()
+}
+
+func (it *minusIterator) Close() error {
+	return it.left.Close()
+}
+
+// isCompatible checks if two bindings are compatible (no conflicting variable values)
+func (it *minusIterator) isCompatible(left, right *store.Binding) bool {
+	for varName, leftTerm := range left.Vars {
+		if rightTerm, exists := right.Vars[varName]; exists {
+			if !leftTerm.Equals(rightTerm) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// createOrderByIterator creates an iterator for ORDER BY operations
+func (e *Executor) createOrderByIterator(plan *optimizer.OrderByPlan) (store.BindingIterator, error) {
+	input, err := e.createIterator(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	return &orderByIterator{
+		input:   input,
+		orderBy: plan.OrderBy,
+	}, nil
+}
+
+// orderByIterator implements ORDER BY operations
+type orderByIterator struct {
+	input       store.BindingIterator
+	orderBy     []*parser.OrderCondition
+	bindings    []*store.Binding
+	position    int
+	initialized bool
+}
+
+func (it *orderByIterator) Next() bool {
+	// Materialize and sort all bindings on first call
+	if !it.initialized {
+		it.initialized = true
+
+		// Collect all bindings
+		for it.input.Next() {
+			binding := it.input.Binding()
+			it.bindings = append(it.bindings, binding.Clone())
+		}
+
+		// Sort bindings according to ORDER BY conditions
+		it.sortBindings()
+	}
+
+	if it.position >= len(it.bindings) {
+		return false
+	}
+
+	it.position++
+	return true
+}
+
+func (it *orderByIterator) Binding() *store.Binding {
+	if it.position > 0 && it.position <= len(it.bindings) {
+		return it.bindings[it.position-1]
+	}
+	return store.NewBinding()
+}
+
+func (it *orderByIterator) Close() error {
+	return it.input.Close()
+}
+
+// sortBindings sorts the bindings according to ORDER BY conditions
+func (it *orderByIterator) sortBindings() {
+	if len(it.orderBy) == 0 {
+		return
+	}
+
+	// Use a simple bubble sort with comparison function
+	// For better performance, could use sort.Slice with a custom Less function
+	for i := 0; i < len(it.bindings); i++ {
+		for j := i + 1; j < len(it.bindings); j++ {
+			if it.shouldSwap(it.bindings[i], it.bindings[j]) {
+				it.bindings[i], it.bindings[j] = it.bindings[j], it.bindings[i]
+			}
+		}
+	}
+}
+
+// shouldSwap returns true if binding a should come after binding b
+func (it *orderByIterator) shouldSwap(a, b *store.Binding) bool {
+	// Compare based on each ORDER BY condition in order
+	for _, condition := range it.orderBy {
+		cmp := it.compareByCondition(a, b, condition)
+
+		if cmp != 0 {
+			// If descending, reverse the comparison
+			if !condition.Ascending {
+				cmp = -cmp
+			}
+			return cmp > 0
+		}
+		// If equal, continue to next condition
+	}
+	return false
+}
+
+// compareByCondition compares two bindings based on a single order condition
+// Returns: -1 if a < b, 0 if a == b, 1 if a > b
+func (it *orderByIterator) compareByCondition(a, b *store.Binding, condition *parser.OrderCondition) int {
+	// For now, only handle simple variable expressions
+	// TODO: Evaluate full expressions once expression evaluator is implemented
+
+	varExpr, ok := condition.Expression.(*parser.VariableExpression)
+	if !ok {
+		// Can't evaluate complex expressions yet, treat as equal
+		return 0
+	}
+
+	varName := varExpr.Variable.Name
+
+	aVal, aExists := a.Vars[varName]
+	bVal, bExists := b.Vars[varName]
+
+	// Handle missing values (unbound variables)
+	if !aExists && !bExists {
+		return 0
+	}
+	if !aExists {
+		return -1 // Treat unbound as less than any value
+	}
+	if !bExists {
+		return 1
+	}
+
+	// Compare the terms
+	return it.compareTerms(aVal, bVal)
+}
+
+// compareTerms compares two RDF terms according to SPARQL ordering rules
+// Returns: -1 if a < b, 0 if a == b, 1 if a > b
+// SPARQL order: (Unbound) < Blank nodes < IRIs < Literals (by datatype, then value)
+func (it *orderByIterator) compareTerms(a, b rdf.Term) int {
+	// Determine term types
+	aType := termSortOrder(a)
+	bType := termSortOrder(b)
+
+	// If different types, order by type
+	if aType != bType {
+		if aType < bType {
+			return -1
+		}
+		return 1
+	}
+
+	// Same type - compare values within type
+	switch a.(type) {
+	case *rdf.BlankNode:
+		// Blank nodes: compare by identifier
+		aBlank := a.(*rdf.BlankNode)
+		bBlank := b.(*rdf.BlankNode)
+		if aBlank.ID < bBlank.ID {
+			return -1
+		}
+		if aBlank.ID > bBlank.ID {
+			return 1
+		}
+		return 0
+
+	case *rdf.NamedNode:
+		// IRIs: compare lexically
+		aNode := a.(*rdf.NamedNode)
+		bNode := b.(*rdf.NamedNode)
+		if aNode.IRI < bNode.IRI {
+			return -1
+		}
+		if aNode.IRI > bNode.IRI {
+			return 1
+		}
+		return 0
+
+	case *rdf.Literal:
+		// Literals: compare by value, considering datatype
+		return compareLiterals(a.(*rdf.Literal), b.(*rdf.Literal))
+
+	default:
+		// Fallback to string comparison
+		aStr := a.String()
+		bStr := b.String()
+		if aStr < bStr {
+			return -1
+		}
+		if aStr > bStr {
+			return 1
+		}
+		return 0
+	}
+}
+
+// termSortOrder returns the sort order priority for a term type
+// Lower numbers come first in ordering
+func termSortOrder(t rdf.Term) int {
+	switch t.(type) {
+	case *rdf.BlankNode:
+		return 0
+	case *rdf.NamedNode:
+		return 1
+	case *rdf.Literal:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// compareLiterals compares two literals according to SPARQL rules
+// Handles numeric types with numeric comparison, others with lexical comparison
+func compareLiterals(a, b *rdf.Literal) int {
+	// Try numeric comparison if both are numeric types
+	aNum, aIsNum := tryParseNumeric(a)
+	bNum, bIsNum := tryParseNumeric(b)
+
+	if aIsNum && bIsNum {
+		// Numeric comparison
+		if aNum < bNum {
+			return -1
+		}
+		if aNum > bNum {
+			return 1
+		}
+		return 0
+	}
+
+	// Different datatypes or non-numeric: compare by datatype IRI first, then lexically
+	aDT := ""
+	if a.Datatype != nil {
+		aDT = a.Datatype.IRI
+	}
+	bDT := ""
+	if b.Datatype != nil {
+		bDT = b.Datatype.IRI
+	}
+
+	if aDT != bDT {
+		if aDT < bDT {
+			return -1
+		}
+		return 1
+	}
+
+	// Same datatype: lexical comparison
+	if a.Value < b.Value {
+		return -1
+	}
+	if a.Value > b.Value {
+		return 1
+	}
+	return 0
+}
+
+// tryParseNumeric attempts to parse a literal as a numeric value
+// Returns (value, true) if successful, (0, false) otherwise
+func tryParseNumeric(lit *rdf.Literal) (float64, bool) {
+	if lit.Datatype == nil {
+		return 0, false
+	}
+
+	dt := lit.Datatype.IRI
+	// Check if it's a numeric datatype
+	switch dt {
+	case "http://www.w3.org/2001/XMLSchema#integer",
+		"http://www.w3.org/2001/XMLSchema#decimal",
+		"http://www.w3.org/2001/XMLSchema#float",
+		"http://www.w3.org/2001/XMLSchema#double",
+		"http://www.w3.org/2001/XMLSchema#int",
+		"http://www.w3.org/2001/XMLSchema#long",
+		"http://www.w3.org/2001/XMLSchema#short",
+		"http://www.w3.org/2001/XMLSchema#byte",
+		"http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+		"http://www.w3.org/2001/XMLSchema#positiveInteger",
+		"http://www.w3.org/2001/XMLSchema#unsignedLong",
+		"http://www.w3.org/2001/XMLSchema#unsignedInt",
+		"http://www.w3.org/2001/XMLSchema#unsignedShort",
+		"http://www.w3.org/2001/XMLSchema#unsignedByte",
+		"http://www.w3.org/2001/XMLSchema#nonPositiveInteger",
+		"http://www.w3.org/2001/XMLSchema#negativeInteger":
+		// Try to parse as float64
+		var val float64
+		_, err := fmt.Sscanf(lit.Value, "%f", &val)
+		if err == nil {
+			return val, true
+		}
+	}
+	return 0, false
+}
+
+// extractVariablesFromGraphPattern extracts all variables from a graph pattern
+// in the order they first appear. This is used for SELECT * queries to determine
+// the column order in result sets.
+func extractVariablesFromGraphPattern(pattern *parser.GraphPattern) []*parser.Variable {
+	if pattern == nil {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var variables []*parser.Variable
+
+	// Helper to add variable if not seen
+	addVar := func(v *parser.Variable) {
+		if v != nil && !seen[v.Name] {
+			seen[v.Name] = true
+			variables = append(variables, v)
+		}
+	}
+
+	// Helper to extract variables from TermOrVariable
+	extractFromTerm := func(t parser.TermOrVariable) {
+		addVar(t.Variable)
+	}
+
+	// Process patterns in order
+	var processPattern func(*parser.GraphPattern)
+	processPattern = func(p *parser.GraphPattern) {
+		if p == nil {
+			return
+		}
+
+		// Process elements in order (preserves query text order)
+		for _, elem := range p.Elements {
+			if elem.Triple != nil {
+				extractFromTerm(elem.Triple.Subject)
+				extractFromTerm(elem.Triple.Predicate)
+				extractFromTerm(elem.Triple.Object)
+			}
+			if elem.Bind != nil {
+				addVar(elem.Bind.Variable)
+			}
+			// Filters don't introduce new variables
+		}
+
+		// Also process legacy Patterns array (for backward compatibility)
+		for _, triple := range p.Patterns {
+			extractFromTerm(triple.Subject)
+			extractFromTerm(triple.Predicate)
+			extractFromTerm(triple.Object)
+		}
+
+		// Process BIND expressions (legacy)
+		for _, bind := range p.Binds {
+			addVar(bind.Variable)
+		}
+
+		// Recursively process child patterns (UNION, OPTIONAL, etc.)
+		for _, child := range p.Children {
+			processPattern(child)
+		}
+	}
+
+	processPattern(pattern)
+	return variables
+}
+
+// emptyIterator produces a single empty binding.
+// This is used for empty graph patterns like { FILTER(expr) } with no triples.
+// According to SPARQL semantics, an empty pattern {} produces one binding μ = {}.
+type emptyIterator struct {
+	returned bool
+	binding  *store.Binding
+}
+
+func (it *emptyIterator) Next() bool {
+	if it.returned {
+		return false
+	}
+	it.returned = true
+	it.binding = store.NewBinding()
+	return true
+}
+
+func (it *emptyIterator) Binding() *store.Binding {
+	return it.binding
+}
+
+func (it *emptyIterator) Close() error {
+	return nil
+}
+
+// noBindingsIterator returns no bindings at all (empty result set)
+type noBindingsIterator struct{}
+
+func (it *noBindingsIterator) Next() bool {
+	return false
+}
+
+func (it *noBindingsIterator) Binding() *store.Binding {
+	return nil
+}
+
+func (it *noBindingsIterator) Close() error {
+	return nil
+}
+
+// emptyGraphEnumerator enumerates unique graph names for GRAPH ?g {} patterns
+type emptyGraphEnumerator struct {
+	quadIter     store.QuadIterator
+	graphVarName string
+	seenGraphs   map[string]bool
+	binding      *store.Binding
+}
+
+func (it *emptyGraphEnumerator) Next() bool {
+	for it.quadIter.Next() {
+		quad, err := it.quadIter.Quad()
+		if err != nil {
+			continue
+		}
+
+		// Skip the default graph - GRAPH ?g {} only enumerates named graphs
+		if quad.Graph.Type() == rdf.TermTypeDefaultGraph {
+			continue
+		}
+
+		graphName := quad.Graph.String()
+
+		// Skip if we've already seen this graph
+		if it.seenGraphs[graphName] {
+			continue
+		}
+
+		// Mark as seen and return binding
+		it.seenGraphs[graphName] = true
+		it.binding = store.NewBinding()
+		// Bind to HiddenVars, not Vars, so BOUND(?g) returns false inside GRAPH pattern
+		// The graphPromotionIterator will promote this to Vars outside the pattern
+		it.binding.HiddenVars[it.graphVarName] = quad.Graph
+		return true
+	}
+	return false
+}
+
+func (it *emptyGraphEnumerator) Binding() *store.Binding {
+	return it.binding
+}
+
+func (it *emptyGraphEnumerator) Close() error {
+	return it.quadIter.Close()
+}

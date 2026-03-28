@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTTP API - Trigo Documentation</title>
+    <meta name="description" content="HTTP SPARQL endpoint documentation for Trigo - query methods, response formats, and bulk data loading">
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <div class="logo-section">
+                <svg viewBox="240 100 520 500" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M487.5 109.6C469 111.5 442.8 117.5 426.4 123.6C414.2 128.1 392.9 138.2 383.5 144C339.2 171.1 301.8 217.1 284.6 265.5C261.6 330.4 266.1 403.4 296.8 462C309.5 486.3 321.7 502.8 341.4 522.5C384.2 565.2 437.4 588.4 500.5 591.8C516.5 592.7 520.3 592.6 537.5 590.9C573.9 587.3 614.8 572.8 646 552.3C729.1 497.7 769.7 395.2 747.5 295.9C739.6 261.1 723.3 226.7 701.8 200C687.5 182.2 661.2 158.9 641.2 146.3C625.7 136.5 603.5 126.1 586.5 120.6C578.2 118 557.1 113.1 546.5 111.5C536.9 109.9 496.7 108.7 487.5 109.6ZM540.6 132.5C610.7 141.7 673.5 185.5 706.4 248C722.9 279.4 730.7 308.9 731.7 343.5C733.5 405.6 710.7 463.8 667.8 506.1C633.9 539.7 594.9 559.5 546 568.2C527.6 571.4 494 571.4 475.5 568.1C424.9 559 380 534.2 348.2 497.6C332.6 479.7 324.8 468.5 316 451.2C305 429.9 297.7 406.5 293.4 378C290.9 362.1 290.9 332.6 293.3 317.1C298 287 308.8 258.1 324.8 232.3C341 206.1 365.3 181.6 392 164.6C417.1 148.6 454 135.6 484.8 132C496.9 130.6 528.2 130.9 540.6 132.5Z" fill="white"/>
+                    <path d="M498.9 189.5C487.6 193.1 479 200.6 474.2 210.8C471.8 215.9 471.5 217.6 471.5 228.1C471.5 239.3 471.6 239.8 475.1 246.9L478.7 254.1L468.1 267.3C455.6 282.9 413.5 336 399 354.5C393.4 361.6 388.2 367.6 387.4 367.8C386.7 368 383.7 367.7 380.7 367.1C373.8 365.8 364.5 367.1 358.4 370.2C355.9 371.4 351.4 375 348.5 378.2C329 399.2 338.7 433.7 366.4 441.5C389.3 448.1 413 430.6 413 407.1V402.5L438.8 394.7C452.9 390.4 470.4 385 477.5 382.7L490.6 378.5L495.3 381.7C505 388.2 517.2 388.3 527 382C532.9 378.2 525.4 376.5 591.5 396.7L610.5 402.5L611.2 409.4C614.5 443.1 657.5 455 677.6 427.8C683.4 419.9 685.5 413.4 685.4 403.5C685.3 392.2 682.5 385.4 674.6 377.4C666.2 369 660 366.6 647.5 367.3C642.6 367.6 637.7 367.9 636.6 368.1C635.3 368.4 633 366.2 628.1 359.9C624.5 355.2 616.6 345 610.6 337.4C604.6 329.8 593.1 315.2 585.2 305C577.2 294.8 564.9 279.5 557.9 270.8L545.1 255.2L548 249.3C559.1 227.3 550.8 201.8 529.2 191.7C523.4 189 521.3 188.5 513 188.3C506.7 188.1 501.9 188.5 498.9 189.5ZM512.5 269C516.5 269 521.6 268.3 523.9 267.5L528 266.1L531.4 270.3C540.8 281.8 580.7 332.6 601.8 360C614.3 376.2 618.7 382.6 617.6 382.8C616.7 383 604.1 379.7 589.7 375.5C547.4 363.2 540.6 361 539.8 359.7C539.4 359.1 539 356.6 539 354.2C539 346.6 533.2 338.3 524.6 333.7C518.7 330.5 504.3 330.5 498.4 333.7C489.7 338.3 484.8 345.7 483.3 356L482.5 361.3L466 366.1C441.5 373.4 412.9 381.7 409.7 382.4C407.1 383 406.9 382.8 407.2 380.6C407.5 378.4 434.2 343.7 482.2 283.4L495.9 266.2L500.6 267.6C503.2 268.4 508.6 269 512.5 269Z" fill="white"/>
+                </svg>
+                <h1>Trigo Documentation</h1>
+            </div>
+            <nav>
+                <ul>
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="quickstart.html">Quick Start</a></li>
+                    <li><a href="architecture.html">Architecture</a></li>
+                    <li><a href="http-endpoint.html" class="active">HTTP API</a></li>
+                    <li><a href="testing.html">Testing</a></li>
+                    <li><a href="https://github.com/carmel/triplestore" target="_blank">GitHub</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <h1>HTTP SPARQL Endpoint</h1>
+
+        <p>Trigo provides a standard W3C SPARQL 1.1 Protocol compliant HTTP endpoint.</p>
+
+        <h2>Starting the Server</h2>
+
+        <pre><code># Build the application
+go build -o trigo ./cmd/trigo
+
+# Start with default address (localhost:8080)
+./trigo serve
+
+# Start with custom address
+./trigo serve localhost:3000
+./trigo serve 0.0.0.0:8080</code></pre>
+
+        <h2>Endpoint URL</h2>
+
+        <pre><code>http://localhost:8080/sparql</code></pre>
+
+        <h2>Protocol Support</h2>
+
+        <p>Trigo implements the <a href="https://www.w3.org/TR/sparql11-protocol/" target="_blank">W3C SPARQL 1.1 Protocol</a> specification.</p>
+
+        <h3>HTTP Methods</h3>
+
+        <h4>GET Request</h4>
+
+        <p>Query string passed via <code>query</code> URL parameter:</p>
+
+        <pre><code>curl -G http://localhost:8080/sparql \
+  --data-urlencode 'query=SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10' \
+  -H 'Accept: application/sparql-results+json'</code></pre>
+
+        <h4>POST Request</h4>
+
+        <p>Three content-type options:</p>
+
+        <p><strong>1. Direct SPARQL Query (Recommended)</strong></p>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -H 'Accept: application/sparql-results+json' \
+  -d 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10'</code></pre>
+
+        <p><strong>2. Form-encoded</strong></p>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -H 'Accept: application/sparql-results+json' \
+  --data-urlencode 'query=SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10'</code></pre>
+
+        <p><strong>3. Query in Body (fallback)</strong></p>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Accept: application/sparql-results+json' \
+  -d 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10'</code></pre>
+
+        <h2>Response Formats</h2>
+
+        <p>Trigo supports content negotiation via the <code>Accept</code> header:</p>
+
+        <h3>SPARQL JSON Results (Default)</h3>
+
+        <p><strong>Spec:</strong> <a href="https://www.w3.org/TR/sparql11-results-json/" target="_blank">https://www.w3.org/TR/sparql11-results-json/</a></p>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -H 'Accept: application/sparql-results+json' \
+  -d 'SELECT ?person ?name WHERE {
+        ?person &lt;http://xmlns.com/foaf/0.1/name&gt; ?name
+      }'</code></pre>
+
+        <p><strong>Response:</strong></p>
+        <pre><code>{
+  "head": {
+    "vars": ["person", "name"]
+  },
+  "results": {
+    "bindings": [
+      {
+        "person": {
+          "type": "uri",
+          "value": "http://example.org/alice"
+        },
+        "name": {
+          "type": "literal",
+          "value": "Alice"
+        }
+      }
+    ]
+  }
+}</code></pre>
+
+        <h3>SPARQL XML Results</h3>
+
+        <p><strong>Spec:</strong> <a href="https://www.w3.org/TR/rdf-sparql-XMLres/" target="_blank">https://www.w3.org/TR/rdf-sparql-XMLres/</a></p>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -H 'Accept: application/sparql-results+xml' \
+  -d 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 1'</code></pre>
+
+        <p><strong>Response:</strong></p>
+        <pre><code>&lt;?xml version="1.0"?&gt;
+&lt;sparql xmlns="http://www.w3.org/2005/sparql-results#"&gt;
+  &lt;head&gt;
+    &lt;variable name="s"/&gt;
+    &lt;variable name="p"/&gt;
+    &lt;variable name="o"/&gt;
+  &lt;/head&gt;
+  &lt;results&gt;
+    &lt;result&gt;
+      &lt;binding name="s"&gt;
+        &lt;uri&gt;http://example.org/alice&lt;/uri&gt;
+      &lt;/binding&gt;
+      &lt;binding name="p"&gt;
+        &lt;uri&gt;http://xmlns.com/foaf/0.1/name&lt;/uri&gt;
+      &lt;/binding&gt;
+      &lt;binding name="o"&gt;
+        &lt;literal&gt;Alice&lt;/literal&gt;
+      &lt;/binding&gt;
+    &lt;/result&gt;
+  &lt;/results&gt;
+&lt;/sparql&gt;</code></pre>
+
+        <h3>SPARQL CSV Results</h3>
+
+        <p><strong>Spec:</strong> <a href="https://www.w3.org/TR/sparql11-results-csv-tsv/" target="_blank">https://www.w3.org/TR/sparql11-results-csv-tsv/</a></p>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -H 'Accept: text/csv' \
+  -d 'SELECT ?person ?name WHERE {
+        ?person &lt;http://xmlns.com/foaf/0.1/name&gt; ?name
+      } LIMIT 2'</code></pre>
+
+        <p><strong>Response:</strong></p>
+        <pre><code>person,name
+http://example.org/alice,Alice
+http://example.org/bob,Bob</code></pre>
+
+        <h3>SPARQL TSV Results</h3>
+
+        <p><strong>Spec:</strong> <a href="https://www.w3.org/TR/sparql11-results-csv-tsv/" target="_blank">https://www.w3.org/TR/sparql11-results-csv-tsv/</a></p>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -H 'Accept: text/tab-separated-values' \
+  -d 'SELECT ?person ?name WHERE {
+        ?person &lt;http://xmlns.com/foaf/0.1/name&gt; ?name
+      } LIMIT 2'</code></pre>
+
+        <p><strong>Response:</strong></p>
+        <pre><code>?person	?name
+&lt;http://example.org/alice&gt;	"Alice"
+&lt;http://example.org/bob&gt;	"Bob"</code></pre>
+
+        <h2>Query Types</h2>
+
+        <h3>SELECT Queries</h3>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -H 'Accept: application/sparql-results+json' \
+  -d 'SELECT ?person ?name ?age WHERE {
+        ?person &lt;http://xmlns.com/foaf/0.1/name&gt; ?name .
+        ?person &lt;http://xmlns.com/foaf/0.1/age&gt; ?age .
+      }
+      ORDER BY ?name
+      LIMIT 10'</code></pre>
+
+        <h3>ASK Queries</h3>
+
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -H 'Accept: application/sparql-results+json' \
+  -d 'ASK WHERE {
+        &lt;http://example.org/alice&gt; &lt;http://xmlns.com/foaf/0.1/name&gt; "Alice"
+      }'</code></pre>
+
+        <p><strong>Response:</strong></p>
+        <pre><code>{
+  "head": {
+    "vars": []
+  },
+  "boolean": true
+}</code></pre>
+
+        <h2>Bulk Data Loading</h2>
+
+        <p>The <code>/data</code> endpoint allows bulk uploading of RDF data in various formats.</p>
+
+        <h3>Endpoint</h3>
+
+        <pre><code>POST http://localhost:8080/data</code></pre>
+
+        <h3>Supported Formats</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Format</th>
+                    <th>Content-Type</th>
+                    <th>File Extension</th>
+                    <th>Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>N-Triples</td>
+                    <td><code>application/n-triples</code></td>
+                    <td><code>.nt</code></td>
+                    <td>Triples only (default graph)</td>
+                </tr>
+                <tr>
+                    <td>N-Quads</td>
+                    <td><code>application/n-quads</code></td>
+                    <td><code>.nq</code></td>
+                    <td>Quads with named graphs</td>
+                </tr>
+                <tr>
+                    <td>Turtle</td>
+                    <td><code>text/turtle</code></td>
+                    <td><code>.ttl</code></td>
+                    <td>Compact syntax with prefixes</td>
+                </tr>
+                <tr>
+                    <td>TriG</td>
+                    <td><code>application/trig</code></td>
+                    <td><code>.trig</code></td>
+                    <td>Turtle + named graphs</td>
+                </tr>
+                <tr>
+                    <td>RDF/XML</td>
+                    <td><code>application/rdf+xml</code></td>
+                    <td><code>.rdf</code>, <code>.owl</code></td>
+                    <td>XML-based format</td>
+                </tr>
+                <tr>
+                    <td>JSON-LD</td>
+                    <td><code>application/ld+json</code></td>
+                    <td><code>.jsonld</code></td>
+                    <td>JSON-based linked data</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Examples</h3>
+
+        <h4>Upload N-Triples</h4>
+
+        <pre><code>curl -X POST http://localhost:8080/data \
+  -H 'Content-Type: application/n-triples' \
+  --data-binary @data.nt</code></pre>
+
+        <h4>Upload Turtle</h4>
+
+        <pre><code>curl -X POST http://localhost:8080/data \
+  -H 'Content-Type: text/turtle' \
+  --data-binary @data.ttl</code></pre>
+
+        <h4>Upload TriG (Named Graphs)</h4>
+
+        <pre><code>curl -X POST http://localhost:8080/data \
+  -H 'Content-Type: application/trig' \
+  --data-binary @data.trig</code></pre>
+
+        <h4>Upload RDF/XML</h4>
+
+        <pre><code>curl -X POST http://localhost:8080/data \
+  -H 'Content-Type: application/rdf+xml' \
+  --data-binary @data.rdf</code></pre>
+
+        <h4>Upload JSON-LD</h4>
+
+        <pre><code>curl -X POST http://localhost:8080/data \
+  -H 'Content-Type: application/ld+json' \
+  --data-binary @data.jsonld</code></pre>
+
+        <h3>Response</h3>
+
+        <pre><code>{
+  "success": true,
+  "statistics": {
+    "quadsInserted": 1000,
+    "durationMs": 245,
+    "quadsPerSecond": 4081.63
+  }
+}</code></pre>
+
+        <h3>Format Notes</h3>
+
+        <p><strong>TriG</strong>: Extends Turtle with GRAPH blocks for named graphs</p>
+        <pre><code>PREFIX ex: &lt;http://example.org/&gt;
+
+# Default graph
+ex:alice ex:name "Alice" .
+
+# Named graph
+GRAPH ex:graph1 {
+  ex:bob ex:name "Bob" .
+}</code></pre>
+
+        <p><strong>RDF/XML</strong>: Simplified parser supporting common patterns</p>
+        <ul>
+            <li>rdf:Description elements</li>
+            <li>Property elements with text or rdf:resource</li>
+            <li>rdf:datatype and xml:lang attributes</li>
+            <li>Nested blank nodes</li>
+        </ul>
+
+        <p><strong>JSON-LD</strong>: Simplified parser supporting common patterns</p>
+        <ul>
+            <li>@context for prefix expansion</li>
+            <li>@id for resource IRIs</li>
+            <li>@value objects with @type and @language</li>
+            <li>Nested objects as blank nodes</li>
+        </ul>
+
+        <h2>Web Interface</h2>
+
+        <p>Visit <code>http://localhost:8080/</code> in your browser for a full-featured SPARQL query interface powered by <a href="https://github.com/zazuko/Yasgui" target="_blank">YASGUI</a>.</p>
+
+        <h3>Features</h3>
+
+        <ul>
+            <li><strong>Interactive Query Editor</strong>
+                <ul>
+                    <li>Syntax highlighting for SPARQL queries</li>
+                    <li>Auto-completion for keywords and IRIs</li>
+                    <li>Multi-line editing with proper indentation</li>
+                </ul>
+            </li>
+            <li><strong>Result Visualization</strong>
+                <ul>
+                    <li>Table view with sortable columns</li>
+                    <li>Pivot tables for data analysis</li>
+                    <li>Chart visualizations (bar, line, pie)</li>
+                    <li>Raw JSON/XML response view</li>
+                </ul>
+            </li>
+            <li><strong>Query Management</strong>
+                <ul>
+                    <li>Save queries for reuse</li>
+                    <li>Query history with timestamps</li>
+                    <li>Multiple query tabs</li>
+                    <li>Share queries via URL</li>
+                </ul>
+            </li>
+            <li><strong>Endpoint Information</strong>
+                <ul>
+                    <li>Display current endpoint URL</li>
+                    <li>Show database statistics (triple count)</li>
+                    <li>Real-time query execution</li>
+                </ul>
+            </li>
+        </ul>
+
+        <h3>Quick Start with Web UI</h3>
+
+        <ol>
+            <li>Start the server:
+                <pre><code>./trigo serve</code></pre>
+            </li>
+            <li>Open browser to <code>http://localhost:8080/</code></li>
+            <li>Enter a SPARQL query in the editor:
+                <pre><code>SELECT ?s ?p ?o
+WHERE {
+  ?s ?p ?o .
+}
+LIMIT 10</code></pre>
+            </li>
+            <li>Click "Execute" or press Ctrl+Enter</li>
+            <li>View results in table, chart, or raw format</li>
+        </ol>
+
+        <h3>YASGUI Configuration</h3>
+
+        <p>The UI is pre-configured to use the local <code>/sparql</code> endpoint. No additional setup required!</p>
+
+        <h2>CORS Support</h2>
+
+        <p>The endpoint includes CORS headers, allowing queries from web applications:</p>
+
+        <pre><code>Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, OPTIONS
+Access-Control-Allow-Headers: Content-Type, Accept</code></pre>
+
+        <h2>Error Responses</h2>
+
+        <p>Errors are returned as JSON with appropriate HTTP status codes:</p>
+
+        <pre><code>{
+  "error": {
+    "code": 400,
+    "message": "Parse error: expected WHERE clause"
+  }
+}</code></pre>
+
+        <h3>Common Status Codes</h3>
+
+        <ul>
+            <li><code>200 OK</code> - Query executed successfully</li>
+            <li><code>400 Bad Request</code> - Invalid query syntax or missing parameters</li>
+            <li><code>405 Method Not Allowed</code> - Unsupported HTTP method</li>
+            <li><code>500 Internal Server Error</code> - Query execution or optimization error</li>
+        </ul>
+
+        <h2>Client Examples</h2>
+
+        <h3>Python (requests)</h3>
+
+        <pre><code>import requests
+
+query = """
+SELECT ?person ?name
+WHERE {
+    ?person &lt;http://xmlns.com/foaf/0.1/name&gt; ?name .
+}
+LIMIT 5
+"""
+
+response = requests.post(
+    'http://localhost:8080/sparql',
+    data=query,
+    headers={
+        'Content-Type': 'application/sparql-query',
+        'Accept': 'application/sparql-results+json'
+    }
+)
+
+results = response.json()
+for binding in results['results']['bindings']:
+    person = binding['person']['value']
+    name = binding['name']['value']
+    print(f"{person} -&gt; {name}")</code></pre>
+
+        <h3>JavaScript (fetch)</h3>
+
+        <pre><code>const query = `
+  SELECT ?person ?name
+  WHERE {
+    ?person &lt;http://xmlns.com/foaf/0.1/name&gt; ?name .
+  }
+  LIMIT 5
+`;
+
+fetch('http://localhost:8080/sparql', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/sparql-query',
+    'Accept': 'application/sparql-results+json'
+  },
+  body: query
+})
+.then(response =&gt; response.json())
+.then(data =&gt; {
+  data.results.bindings.forEach(binding =&gt; {
+    console.log(`${binding.person.value} -&gt; ${binding.name.value}`);
+  });
+});</code></pre>
+
+        <h3>cURL Examples</h3>
+
+        <p><strong>Find all triples:</strong></p>
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -d 'SELECT * WHERE { ?s ?p ?o } LIMIT 100'</code></pre>
+
+        <p><strong>Filter by predicate:</strong></p>
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -d 'SELECT ?s ?o WHERE {
+        ?s &lt;http://xmlns.com/foaf/0.1/knows&gt; ?o
+      }'</code></pre>
+
+        <p><strong>Multiple patterns:</strong></p>
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -d 'SELECT ?person ?friend ?friendName WHERE {
+        ?person &lt;http://xmlns.com/foaf/0.1/knows&gt; ?friend .
+        ?friend &lt;http://xmlns.com/foaf/0.1/name&gt; ?friendName .
+      }'</code></pre>
+
+        <p><strong>DISTINCT results:</strong></p>
+        <pre><code>curl -X POST http://localhost:8080/sparql \
+  -H 'Content-Type: application/sparql-query' \
+  -d 'SELECT DISTINCT ?predicate WHERE {
+        ?s ?predicate ?o
+      }'</code></pre>
+
+        <h2>Performance Tips</h2>
+
+        <ol>
+            <li><strong>Use LIMIT</strong>: Always add <code>LIMIT</code> for exploratory queries</li>
+            <li><strong>Bind Variables</strong>: More bound terms = faster queries</li>
+            <li><strong>Index Selection</strong>: The server automatically selects the optimal index</li>
+            <li><strong>Connection Pooling</strong>: Reuse HTTP connections for multiple queries</li>
+        </ol>
+
+        <h2>Integration with Other Tools</h2>
+
+        <h3>Apache Jena (Java)</h3>
+
+        <pre><code>import org.apache.jena.query.*;
+
+String sparqlEndpoint = "http://localhost:8080/sparql";
+String queryString = "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10";
+
+QueryExecution qexec = QueryExecutionFactory.sparqlService(
+    sparqlEndpoint,
+    queryString
+);
+
+ResultSet results = qexec.execSelect();
+ResultSetFormatter.out(System.out, results);
+qexec.close();</code></pre>
+
+        <h3>RDFLib (Python)</h3>
+
+        <pre><code>from SPARQLWrapper import SPARQLWrapper, JSON
+
+sparql = SPARQLWrapper("http://localhost:8080/sparql")
+sparql.setQuery("""
+    SELECT ?person ?name
+    WHERE {
+        ?person &lt;http://xmlns.com/foaf/0.1/name&gt; ?name .
+    }
+""")
+sparql.setReturnFormat(JSON)
+
+results = sparql.query().convert()
+for result in results["results"]["bindings"]:
+    print(f"{result['person']['value']} -&gt; {result['name']['value']}")</code></pre>
+
+        <h2>Security Considerations</h2>
+
+        <h3>Current Implementation</h3>
+
+        <ul>
+            <li>No authentication/authorization</li>
+            <li>Open to all clients (CORS: *)</li>
+            <li>Intended for development and trusted environments</li>
+        </ul>
+
+        <h3>Production Deployment</h3>
+
+        <p>For production use, consider adding:</p>
+        <ul>
+            <li>Authentication (API keys, OAuth)</li>
+            <li>Rate limiting</li>
+            <li>Query complexity limits</li>
+            <li>Timeouts</li>
+            <li>Network-level access control (firewall, VPN)</li>
+            <li>Reverse proxy (nginx, Apache) with:
+                <ul>
+                    <li>HTTPS/TLS</li>
+                    <li>Request filtering</li>
+                    <li>Caching</li>
+                    <li>Load balancing</li>
+                </ul>
+            </li>
+        </ul>
+
+        <h2>Next Steps</h2>
+
+        <ul>
+            <li>Read <a href="index.html">README</a> for overview</li>
+            <li>Read <a href="architecture.html">ARCHITECTURE</a> for technical details</li>
+            <li>Read <a href="quickstart.html">QUICKSTART</a> for getting started</li>
+        </ul>
+    </main>
+
+    <footer>
+        <p>&copy; 2025 Trigo Project. Licensed under MIT License.</p>
+        <p>
+            <a href="https://github.com/carmel/triplestore" target="_blank">GitHub</a> |
+            <a href="https://github.com/carmel/triplestore/issues" target="_blank">Issues</a> |
+            <a href="https://github.com/carmel/triplestore/blob/main/CLAUDE.md" target="_blank">AI Assistant Context</a>
+        </p>
+    </footer>
+</body>
+</html>

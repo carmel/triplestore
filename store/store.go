@@ -1,0 +1,402 @@
+package store
+
+import (
+	"bytes"
+	"fmt"
+
+	"github.com/carmel/triplestore/rdf"
+)
+
+// TripleStore manages the RDF triplestore with 11 indexes
+type TripleStore struct {
+	storage Storage
+	encoder TermEncoder
+	decoder TermDecoder
+}
+
+// NewTripleStore creates a new triplestore
+func NewTripleStore(storage Storage, encoder TermEncoder, decoder TermDecoder) *TripleStore {
+	return &TripleStore{
+		storage: storage,
+		encoder: encoder,
+		decoder: decoder,
+	}
+}
+
+// Close closes the triplestore
+func (s *TripleStore) Close() error {
+	return s.storage.Close()
+}
+
+// InsertQuad inserts a quad into the store
+func (s *TripleStore) InsertQuad(quad *rdf.Quad) error {
+	txn, err := s.storage.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer txn.Rollback()
+
+	if err := s.insertQuadInTxn(txn, quad); err != nil {
+		return err
+	}
+
+	return txn.Commit()
+}
+
+// InsertTriple inserts a triple into the default graph
+func (s *TripleStore) InsertTriple(triple *rdf.Triple) error {
+	quad := &rdf.Quad{
+		Subject:   triple.Subject,
+		Predicate: triple.Predicate,
+		Object:    triple.Object,
+		Graph:     rdf.NewDefaultGraph(),
+	}
+	return s.InsertQuad(quad)
+}
+
+// insertQuadInTxn inserts a quad within an existing transaction
+func (s *TripleStore) insertQuadInTxn(txn Transaction, quad *rdf.Quad) error {
+	// Encode terms
+	subjEnc, subjStr, err := s.encoder.EncodeTerm(quad.Subject)
+	if err != nil {
+		return fmt.Errorf("failed to encode subject: %w", err)
+	}
+
+	predEnc, predStr, err := s.encoder.EncodeTerm(quad.Predicate)
+	if err != nil {
+		return fmt.Errorf("failed to encode predicate: %w", err)
+	}
+
+	objEnc, objStr, err := s.encoder.EncodeTerm(quad.Object)
+	if err != nil {
+		return fmt.Errorf("failed to encode object: %w", err)
+	}
+
+	graphEnc, graphStr, err := s.encoder.EncodeTerm(quad.Graph)
+	if err != nil {
+		return fmt.Errorf("failed to encode graph: %w", err)
+	}
+
+	// Store strings in id2str table
+	if err := s.storeString(txn, subjEnc, subjStr); err != nil {
+		return err
+	}
+	if err := s.storeString(txn, predEnc, predStr); err != nil {
+		return err
+	}
+	if err := s.storeString(txn, objEnc, objStr); err != nil {
+		return err
+	}
+	if err := s.storeString(txn, graphEnc, graphStr); err != nil {
+		return err
+	}
+
+	// Empty value for all index entries
+	emptyValue := []byte{}
+
+	// Check if this is the default graph
+	isDefaultGraph := quad.Graph.Type() == rdf.TermTypeDefaultGraph
+
+	if isDefaultGraph {
+		// Insert into default graph indexes (3 permutations)
+		if err := txn.Set(TableSPO, s.encoder.EncodeQuadKey(subjEnc, predEnc, objEnc), emptyValue); err != nil {
+			return err
+		}
+		if err := txn.Set(TablePOS, s.encoder.EncodeQuadKey(predEnc, objEnc, subjEnc), emptyValue); err != nil {
+			return err
+		}
+		if err := txn.Set(TableOSP, s.encoder.EncodeQuadKey(objEnc, subjEnc, predEnc), emptyValue); err != nil {
+			return err
+		}
+	}
+
+	// Insert into named graph indexes (6 permutations)
+	// These are used for both named graphs and can serve as backup for default graph queries
+	if err := txn.Set(TableSPOG, s.encoder.EncodeQuadKey(subjEnc, predEnc, objEnc, graphEnc), emptyValue); err != nil {
+		return err
+	}
+	if err := txn.Set(TablePOSG, s.encoder.EncodeQuadKey(predEnc, objEnc, subjEnc, graphEnc), emptyValue); err != nil {
+		return err
+	}
+	if err := txn.Set(TableOSPG, s.encoder.EncodeQuadKey(objEnc, subjEnc, predEnc, graphEnc), emptyValue); err != nil {
+		return err
+	}
+	if err := txn.Set(TableGSPO, s.encoder.EncodeQuadKey(graphEnc, subjEnc, predEnc, objEnc), emptyValue); err != nil {
+		return err
+	}
+	if err := txn.Set(TableGPOS, s.encoder.EncodeQuadKey(graphEnc, predEnc, objEnc, subjEnc), emptyValue); err != nil {
+		return err
+	}
+	if err := txn.Set(TableGOSP, s.encoder.EncodeQuadKey(graphEnc, objEnc, subjEnc, predEnc), emptyValue); err != nil {
+		return err
+	}
+
+	// Track named graph
+	if !isDefaultGraph {
+		if err := txn.Set(TableGraphs, graphEnc[:], emptyValue); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// storeString stores a string in the id2str table if provided
+func (s *TripleStore) storeString(txn Transaction, encoded EncodedTerm, str *string) error {
+	if str == nil {
+		return nil
+	}
+
+	// Use the encoded term (which contains the hash) as the key
+	key := encoded[1:] // Skip the type byte, use the hash/data portion
+	value := []byte(*str)
+
+	// Check if already exists to avoid unnecessary writes
+	existing, err := txn.Get(TableID2Str, key)
+	if err == nil && bytes.Equal(existing, value) {
+		return nil
+	}
+	if err != nil && err != ErrNotFound {
+		return err
+	}
+
+	return txn.Set(TableID2Str, key, value)
+}
+
+// DeleteQuad deletes a quad from the store
+func (s *TripleStore) DeleteQuad(quad *rdf.Quad) error {
+	txn, err := s.storage.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer txn.Rollback()
+
+	if err := s.deleteQuadInTxn(txn, quad); err != nil {
+		return err
+	}
+
+	return txn.Commit()
+}
+
+// DeleteTriple deletes a triple from the default graph
+func (s *TripleStore) DeleteTriple(triple *rdf.Triple) error {
+	quad := &rdf.Quad{
+		Subject:   triple.Subject,
+		Predicate: triple.Predicate,
+		Object:    triple.Object,
+		Graph:     rdf.NewDefaultGraph(),
+	}
+	return s.DeleteQuad(quad)
+}
+
+// deleteQuadInTxn deletes a quad within an existing transaction
+func (s *TripleStore) deleteQuadInTxn(txn Transaction, quad *rdf.Quad) error {
+	// Encode terms
+	subjEnc, _, err := s.encoder.EncodeTerm(quad.Subject)
+	if err != nil {
+		return fmt.Errorf("failed to encode subject: %w", err)
+	}
+
+	predEnc, _, err := s.encoder.EncodeTerm(quad.Predicate)
+	if err != nil {
+		return fmt.Errorf("failed to encode predicate: %w", err)
+	}
+
+	objEnc, _, err := s.encoder.EncodeTerm(quad.Object)
+	if err != nil {
+		return fmt.Errorf("failed to encode object: %w", err)
+	}
+
+	graphEnc, _, err := s.encoder.EncodeTerm(quad.Graph)
+	if err != nil {
+		return fmt.Errorf("failed to encode graph: %w", err)
+	}
+
+	// Check if this is the default graph
+	isDefaultGraph := quad.Graph.Type() == rdf.TermTypeDefaultGraph
+
+	if isDefaultGraph {
+		// Delete from default graph indexes
+		if err := txn.Delete(TableSPO, s.encoder.EncodeQuadKey(subjEnc, predEnc, objEnc)); err != nil {
+			return err
+		}
+		if err := txn.Delete(TablePOS, s.encoder.EncodeQuadKey(predEnc, objEnc, subjEnc)); err != nil {
+			return err
+		}
+		if err := txn.Delete(TableOSP, s.encoder.EncodeQuadKey(objEnc, subjEnc, predEnc)); err != nil {
+			return err
+		}
+	}
+
+	// Delete from named graph indexes
+	if err := txn.Delete(TableSPOG, s.encoder.EncodeQuadKey(subjEnc, predEnc, objEnc, graphEnc)); err != nil {
+		return err
+	}
+	if err := txn.Delete(TablePOSG, s.encoder.EncodeQuadKey(predEnc, objEnc, subjEnc, graphEnc)); err != nil {
+		return err
+	}
+	if err := txn.Delete(TableOSPG, s.encoder.EncodeQuadKey(objEnc, subjEnc, predEnc, graphEnc)); err != nil {
+		return err
+	}
+	if err := txn.Delete(TableGSPO, s.encoder.EncodeQuadKey(graphEnc, subjEnc, predEnc, objEnc)); err != nil {
+		return err
+	}
+	if err := txn.Delete(TableGPOS, s.encoder.EncodeQuadKey(graphEnc, predEnc, objEnc, subjEnc)); err != nil {
+		return err
+	}
+	if err := txn.Delete(TableGOSP, s.encoder.EncodeQuadKey(graphEnc, objEnc, subjEnc, predEnc)); err != nil {
+		return err
+	}
+
+	// Note: We don't remove from graphs table or id2str table
+	// as they may be referenced by other quads (no garbage collection)
+
+	return nil
+}
+
+// ContainsQuad checks if a quad exists in the store
+func (s *TripleStore) ContainsQuad(quad *rdf.Quad) (bool, error) {
+	txn, err := s.storage.Begin(false)
+	if err != nil {
+		return false, err
+	}
+	defer txn.Rollback()
+
+	// Encode terms
+	subjEnc, _, err := s.encoder.EncodeTerm(quad.Subject)
+	if err != nil {
+		return false, err
+	}
+
+	predEnc, _, err := s.encoder.EncodeTerm(quad.Predicate)
+	if err != nil {
+		return false, err
+	}
+
+	objEnc, _, err := s.encoder.EncodeTerm(quad.Object)
+	if err != nil {
+		return false, err
+	}
+
+	graphEnc, _, err := s.encoder.EncodeTerm(quad.Graph)
+	if err != nil {
+		return false, err
+	}
+
+	// Check in SPOG index
+	key := s.encoder.EncodeQuadKey(subjEnc, predEnc, objEnc, graphEnc)
+	_, err = txn.Get(TableSPOG, key)
+	if err == ErrNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// Count returns the approximate number of quads in the store
+func (s *TripleStore) Count() (int64, error) {
+	txn, err := s.storage.Begin(false)
+	if err != nil {
+		return 0, err
+	}
+	defer txn.Rollback()
+
+	// Count entries in SPOG index (primary index for quads)
+	it, err := txn.Scan(TableSPOG, nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer it.Close()
+
+	count := int64(0)
+	for it.Next() {
+		count++
+	}
+
+	return count, nil
+}
+
+// InsertQuadsBatch inserts multiple quads in a single transaction for better performance
+func (s *TripleStore) InsertQuadsBatch(quads []*rdf.Quad) error {
+	if len(quads) == 0 {
+		return nil
+	}
+
+	txn, err := s.storage.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer txn.Rollback()
+
+	for _, quad := range quads {
+		if err := s.insertQuadInTxn(txn, quad); err != nil {
+			return fmt.Errorf("failed to insert quad: %w", err)
+		}
+	}
+
+	return txn.Commit()
+}
+
+// InsertTriplesBatch inserts multiple triples into the default graph in a single transaction
+func (s *TripleStore) InsertTriplesBatch(triples []*rdf.Triple) error {
+	if len(triples) == 0 {
+		return nil
+	}
+
+	// Convert triples to quads with default graph
+	quads := make([]*rdf.Quad, len(triples))
+	for i, triple := range triples {
+		quads[i] = &rdf.Quad{
+			Subject:   triple.Subject,
+			Predicate: triple.Predicate,
+			Object:    triple.Object,
+			Graph:     rdf.NewDefaultGraph(),
+		}
+	}
+
+	return s.InsertQuadsBatch(quads)
+}
+
+// DeleteQuadsBatch deletes multiple quads in a single transaction for better performance
+func (s *TripleStore) DeleteQuadsBatch(quads []*rdf.Quad) error {
+	if len(quads) == 0 {
+		return nil
+	}
+
+	txn, err := s.storage.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer txn.Rollback()
+
+	for _, quad := range quads {
+		if err := s.deleteQuadInTxn(txn, quad); err != nil {
+			return fmt.Errorf("failed to delete quad: %w", err)
+		}
+	}
+
+	return txn.Commit()
+}
+
+// DeleteTriplesBatch deletes multiple triples from the default graph in a single transaction
+func (s *TripleStore) DeleteTriplesBatch(triples []*rdf.Triple) error {
+	if len(triples) == 0 {
+		return nil
+	}
+
+	// Convert triples to quads with default graph
+	quads := make([]*rdf.Quad, len(triples))
+	for i, triple := range triples {
+		quads[i] = &rdf.Quad{
+			Subject:   triple.Subject,
+			Predicate: triple.Predicate,
+			Object:    triple.Object,
+			Graph:     rdf.NewDefaultGraph(),
+		}
+	}
+
+	return s.DeleteQuadsBatch(quads)
+}

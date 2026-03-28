@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture - Trigo Documentation</title>
+    <meta name="description" content="Technical architecture of Trigo SPARQL query engine - storage, indexing, query optimization, and execution">
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <div class="logo-section">
+                <svg viewBox="240 100 520 500" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M487.5 109.6C469 111.5 442.8 117.5 426.4 123.6C414.2 128.1 392.9 138.2 383.5 144C339.2 171.1 301.8 217.1 284.6 265.5C261.6 330.4 266.1 403.4 296.8 462C309.5 486.3 321.7 502.8 341.4 522.5C384.2 565.2 437.4 588.4 500.5 591.8C516.5 592.7 520.3 592.6 537.5 590.9C573.9 587.3 614.8 572.8 646 552.3C729.1 497.7 769.7 395.2 747.5 295.9C739.6 261.1 723.3 226.7 701.8 200C687.5 182.2 661.2 158.9 641.2 146.3C625.7 136.5 603.5 126.1 586.5 120.6C578.2 118 557.1 113.1 546.5 111.5C536.9 109.9 496.7 108.7 487.5 109.6ZM540.6 132.5C610.7 141.7 673.5 185.5 706.4 248C722.9 279.4 730.7 308.9 731.7 343.5C733.5 405.6 710.7 463.8 667.8 506.1C633.9 539.7 594.9 559.5 546 568.2C527.6 571.4 494 571.4 475.5 568.1C424.9 559 380 534.2 348.2 497.6C332.6 479.7 324.8 468.5 316 451.2C305 429.9 297.7 406.5 293.4 378C290.9 362.1 290.9 332.6 293.3 317.1C298 287 308.8 258.1 324.8 232.3C341 206.1 365.3 181.6 392 164.6C417.1 148.6 454 135.6 484.8 132C496.9 130.6 528.2 130.9 540.6 132.5Z" fill="white"/>
+                    <path d="M498.9 189.5C487.6 193.1 479 200.6 474.2 210.8C471.8 215.9 471.5 217.6 471.5 228.1C471.5 239.3 471.6 239.8 475.1 246.9L478.7 254.1L468.1 267.3C455.6 282.9 413.5 336 399 354.5C393.4 361.6 388.2 367.6 387.4 367.8C386.7 368 383.7 367.7 380.7 367.1C373.8 365.8 364.5 367.1 358.4 370.2C355.9 371.4 351.4 375 348.5 378.2C329 399.2 338.7 433.7 366.4 441.5C389.3 448.1 413 430.6 413 407.1V402.5L438.8 394.7C452.9 390.4 470.4 385 477.5 382.7L490.6 378.5L495.3 381.7C505 388.2 517.2 388.3 527 382C532.9 378.2 525.4 376.5 591.5 396.7L610.5 402.5L611.2 409.4C614.5 443.1 657.5 455 677.6 427.8C683.4 419.9 685.5 413.4 685.4 403.5C685.3 392.2 682.5 385.4 674.6 377.4C666.2 369 660 366.6 647.5 367.3C642.6 367.6 637.7 367.9 636.6 368.1C635.3 368.4 633 366.2 628.1 359.9C624.5 355.2 616.6 345 610.6 337.4C604.6 329.8 593.1 315.2 585.2 305C577.2 294.8 564.9 279.5 557.9 270.8L545.1 255.2L548 249.3C559.1 227.3 550.8 201.8 529.2 191.7C523.4 189 521.3 188.5 513 188.3C506.7 188.1 501.9 188.5 498.9 189.5ZM512.5 269C516.5 269 521.6 268.3 523.9 267.5L528 266.1L531.4 270.3C540.8 281.8 580.7 332.6 601.8 360C614.3 376.2 618.7 382.6 617.6 382.8C616.7 383 604.1 379.7 589.7 375.5C547.4 363.2 540.6 361 539.8 359.7C539.4 359.1 539 356.6 539 354.2C539 346.6 533.2 338.3 524.6 333.7C518.7 330.5 504.3 330.5 498.4 333.7C489.7 338.3 484.8 345.7 483.3 356L482.5 361.3L466 366.1C441.5 373.4 412.9 381.7 409.7 382.4C407.1 383 406.9 382.8 407.2 380.6C407.5 378.4 434.2 343.7 482.2 283.4L495.9 266.2L500.6 267.6C503.2 268.4 508.6 269 512.5 269Z" fill="white"/>
+                </svg>
+                <h1>Trigo Documentation</h1>
+            </div>
+            <nav>
+                <ul>
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="quickstart.html">Quick Start</a></li>
+                    <li><a href="architecture.html" class="active">Architecture</a></li>
+                    <li><a href="http-endpoint.html">HTTP API</a></li>
+                    <li><a href="testing.html">Testing</a></li>
+                    <li><a href="https://github.com/carmel/triplestore" target="_blank">GitHub</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <h1>Trigo Architecture</h1>
+
+        <h2>Overview</h2>
+
+        <p>Trigo is an RDF triplestore inspired by Oxigraph's architecture, implemented in Go. It provides efficient storage and querying of RDF data with SPARQL support.</p>
+
+        <h2>Core Components</h2>
+
+        <h3>1. RDF Data Model (<code>pkg/rdf</code>)</h3>
+
+        <p>Defines the fundamental RDF types:</p>
+
+        <ul>
+            <li><strong>Term</strong>: Interface for all RDF terms
+                <ul>
+                    <li><code>NamedNode</code>: IRIs</li>
+                    <li><code>BlankNode</code>: Anonymous nodes</li>
+                    <li><code>Literal</code>: String and typed literals</li>
+                    <li><code>DefaultGraph</code>: Represents the default graph</li>
+                </ul>
+            </li>
+            <li><strong>Triple</strong>: (Subject, Predicate, Object)</li>
+            <li><strong>Quad</strong>: (Subject, Predicate, Object, Graph)</li>
+        </ul>
+
+        <h3>2. Encoding Layer (<code>internal/encoding</code>)</h3>
+
+        <p>Handles efficient encoding and decoding of RDF terms using xxHash3 128-bit hashing.</p>
+
+        <h4>Encoding Strategy</h4>
+
+        <p>Each term is encoded as:</p>
+        <ul>
+            <li>1 byte: term type</li>
+            <li>16 bytes: hash or inline data</li>
+        </ul>
+
+        <p><strong>Term Types:</strong></p>
+        <ul>
+            <li>Named nodes: Always hashed</li>
+            <li>Blank nodes: Numeric IDs inline, others hashed</li>
+            <li>String literals: ≤16 bytes inline, others hashed</li>
+            <li>Typed literals: Direct binary encoding (integers, floats, dates, etc.)</li>
+        </ul>
+
+        <p><strong>Hash Function:</strong></p>
+        <ul>
+            <li>xxHash3 128-bit variant (zeebo/xxh3)</li>
+            <li>Significantly faster than SipHash while maintaining quality</li>
+        </ul>
+
+        <h4>Key Encoding</h4>
+        <ul>
+            <li>All keys use big-endian encoding for correct lexicographic ordering</li>
+            <li>Enables efficient range scans</li>
+        </ul>
+
+        <h3>3. Storage Layer (<code>internal/storage</code>)</h3>
+
+        <p>Provides an abstraction over key-value stores with BadgerDB implementation.</p>
+
+        <h4>Storage Interface</h4>
+        <pre><code>type Storage interface {
+    Begin(writable bool) (Transaction, error)
+    Close() error
+    Sync() error
+}</code></pre>
+
+        <h4>BadgerDB Implementation</h4>
+        <ul>
+            <li>LSM-tree based storage (similar to RocksDB)</li>
+            <li>ACID transactions with snapshot isolation</li>
+            <li>Pure Go implementation (no CGo dependencies)</li>
+            <li>Optimized for SSDs</li>
+        </ul>
+
+        <h4>Table Structure</h4>
+        <p>11 logical tables (column families):</p>
+
+        <p><strong>Metadata:</strong></p>
+        <ul>
+            <li><code>id2str</code>: Hash → String lookup table</li>
+        </ul>
+
+        <p><strong>Default Graph (3 indexes):</strong></p>
+        <ul>
+            <li><code>spo</code>: Subject → Predicate → Object</li>
+            <li><code>pos</code>: Predicate → Object → Subject</li>
+            <li><code>osp</code>: Object → Subject → Predicate</li>
+        </ul>
+
+        <p><strong>Named Graphs (6 indexes):</strong></p>
+        <ul>
+            <li><code>spog</code>: Subject → Predicate → Object → Graph</li>
+            <li><code>posg</code>: Predicate → Object → Subject → Graph</li>
+            <li><code>ospg</code>: Object → Subject → Predicate → Graph</li>
+            <li><code>gspo</code>: Graph → Subject → Predicate → Object</li>
+            <li><code>gpos</code>: Graph → Predicate → Object → Subject</li>
+            <li><code>gosp</code>: Graph → Object → Subject → Predicate</li>
+        </ul>
+
+        <p><strong>Graph Metadata:</strong></p>
+        <ul>
+            <li><code>graphs</code>: Named graph tracking</li>
+        </ul>
+
+        <h3>4. Store Layer (<code>pkg/store</code>)</h3>
+
+        <p>Manages the triplestore with automatic index maintenance.</p>
+
+        <h4>Operations</h4>
+        <ul>
+            <li><code>InsertQuad/InsertTriple</code>: Adds to all relevant indexes</li>
+            <li><code>DeleteQuad/DeleteTriple</code>: Removes from all indexes</li>
+            <li><code>ContainsQuad</code>: Checks existence</li>
+            <li><code>Query</code>: Pattern matching with automatic index selection</li>
+        </ul>
+
+        <h4>Index Selection Algorithm</h4>
+
+        <p>Selects the optimal index based on bound positions in the pattern:</p>
+
+        <pre><code>Pattern: (?s, bound_p, bound_o, ?g)
+Selected: POS index (predicate and object are bound)</code></pre>
+
+        <p>Priority:</p>
+        <ol>
+            <li>Most bound terms</li>
+            <li>Subject/Predicate bindings preferred over Object</li>
+            <li>Graph-specific indexes when graph is bound</li>
+        </ol>
+
+        <h3>5. SPARQL Parser (<code>pkg/sparql/parser</code>)</h3>
+
+        <p>Converts SPARQL query text to an Abstract Syntax Tree (AST).</p>
+
+        <h4>Supported Query Types</h4>
+        <ul>
+            <li>SELECT (with *, DISTINCT, LIMIT, OFFSET, ORDER BY)</li>
+            <li>ASK</li>
+        </ul>
+
+        <h4>AST Structure</h4>
+        <ul>
+            <li><code>Query</code>: Top-level query representation</li>
+            <li><code>GraphPattern</code>: WHERE clause patterns</li>
+            <li><code>TriplePattern</code>: Triple patterns with variables</li>
+            <li><code>Filter</code>: Filter expressions (parsed, evaluation TODO)</li>
+            <li><code>Expression</code>: Binary/unary operations, functions</li>
+        </ul>
+
+        <h4>Parser Design</h4>
+        <ul>
+            <li>Recursive descent parser</li>
+            <li>Hand-written for better error messages and control</li>
+            <li>Case-insensitive keyword matching</li>
+            <li>Support for IRIs, literals, blank nodes, variables</li>
+        </ul>
+
+        <h3>6. Query Optimizer (<code>pkg/sparql/optimizer</code>)</h3>
+
+        <p>Optimizes query execution plans using heuristic-based optimization.</p>
+
+        <h4>Optimization Techniques</h4>
+
+        <p><strong>1. Join Reordering (Greedy)</strong></p>
+        <ul>
+            <li>Estimates selectivity of each triple pattern</li>
+            <li>Bound terms = more selective (fewer results)</li>
+            <li>Orders patterns from most to least selective</li>
+        </ul>
+
+        <p><strong>Selectivity Heuristics:</strong></p>
+        <pre><code>- Bound subject:   selectivity × 0.01
+- Bound predicate: selectivity × 0.1
+- Bound object:    selectivity × 0.1</code></pre>
+
+        <p><strong>2. Filter Push-Down</strong></p>
+        <ul>
+            <li>Applies filters as soon as all required variables are bound</li>
+            <li>Reduces intermediate result sizes</li>
+        </ul>
+
+        <p><strong>3. Join Type Selection</strong></p>
+        <ul>
+            <li>Currently: Nested loop join (simple, effective for small joins)</li>
+            <li>Future: Hash join, merge join based on cardinality estimates</li>
+        </ul>
+
+        <h4>Query Plans</h4>
+
+        <p>Operators (following Volcano model):</p>
+        <ul>
+            <li><code>ScanPlan</code>: Scan a triple pattern</li>
+            <li><code>JoinPlan</code>: Join two subplans</li>
+            <li><code>FilterPlan</code>: Apply filter predicate</li>
+            <li><code>ProjectionPlan</code>: Select specific variables</li>
+            <li><code>LimitPlan</code>: Limit results</li>
+            <li><code>OffsetPlan</code>: Skip results</li>
+            <li><code>DistinctPlan</code>: Remove duplicates</li>
+            <li><code>OrderByPlan</code>: Sort results</li>
+        </ul>
+
+        <h3>7. Query Executor (<code>pkg/sparql/executor</code>)</h3>
+
+        <p>Executes optimized query plans using the Volcano iterator model.</p>
+
+        <h4>Volcano Iterator Model</h4>
+
+        <p>Each operator is an iterator with:</p>
+        <ul>
+            <li><code>Next()</code>: Advance to next result</li>
+            <li><code>Binding()</code>: Get current variable bindings</li>
+            <li><code>Close()</code>: Release resources</li>
+        </ul>
+
+        <p><strong>Lazy Evaluation:</strong></p>
+        <ul>
+            <li>Results pulled on-demand</li>
+            <li>Low memory footprint</li>
+            <li>Enables pipelining</li>
+        </ul>
+
+        <h4>Iterators</h4>
+
+        <p><strong>ScanIterator:</strong></p>
+        <ul>
+            <li>Wraps store's QuadIterator</li>
+            <li>Binds variables from matched quads</li>
+        </ul>
+
+        <p><strong>NestedLoopJoinIterator:</strong></p>
+        <ul>
+            <li>For each left binding, iterate right side</li>
+            <li>Merges compatible bindings</li>
+            <li>Backtracks on incompatibility</li>
+        </ul>
+
+        <p><strong>FilterIterator:</strong></p>
+        <ul>
+            <li>Passes through bindings that satisfy filter</li>
+        </ul>
+
+        <p><strong>ProjectionIterator:</strong></p>
+        <ul>
+            <li>Projects only selected variables</li>
+        </ul>
+
+        <p><strong>LimitIterator:</strong></p>
+        <ul>
+            <li>Stops after N results</li>
+        </ul>
+
+        <p><strong>OffsetIterator:</strong></p>
+        <ul>
+            <li>Skips first N results</li>
+        </ul>
+
+        <p><strong>DistinctIterator:</strong></p>
+        <ul>
+            <li>Uses hash table to track seen bindings</li>
+        </ul>
+
+        <h2>Query Execution Flow</h2>
+
+        <pre><code>SPARQL Query Text
+       ↓
+   [Parser]
+       ↓
+      AST
+       ↓
+  [Optimizer]
+       ↓
+   Query Plan
+       ↓
+  [Executor]
+       ↓
+   Iterators
+       ↓
+    Results</code></pre>
+
+        <h3>Example Query Execution</h3>
+
+        <p>Query:</p>
+        <pre><code>SELECT ?person ?name
+WHERE {
+  ?person foaf:name ?name .
+  ?person foaf:age ?age .
+}
+LIMIT 10</code></pre>
+
+        <p>Execution Plan:</p>
+        <pre><code>LimitPlan(10)
+  └─ ProjectionPlan([?person, ?name])
+      └─ JoinPlan(NestedLoop)
+          ├─ ScanPlan(?person foaf:age ?age)    [more selective]
+          └─ ScanPlan(?person foaf:name ?name)</code></pre>
+
+        <p>Why this order?</p>
+        <ul>
+            <li><code>age</code> triple likely more selective (fewer people, specific ages)</li>
+            <li>Join on <code>?person</code> variable</li>
+            <li>Project only requested variables</li>
+            <li>Limit applied last</li>
+        </ul>
+
+        <h2>Transaction Model</h2>
+
+        <h3>Snapshot Isolation</h3>
+        <ul>
+            <li>Read transactions see a consistent snapshot</li>
+            <li>Write transactions use atomic batch commits</li>
+            <li>No dirty reads, non-repeatable reads, or phantom reads</li>
+        </ul>
+
+        <h3>No Garbage Collection</h3>
+        <ul>
+            <li>Deleted strings remain in <code>id2str</code> table</li>
+            <li>Trade-off: Simpler implementation, may be referenced elsewhere</li>
+            <li>Future: Reference counting for cleanup</li>
+        </ul>
+
+        <h2>Performance Characteristics</h2>
+
+        <h3>Strengths</h3>
+        <ul>
+            <li><strong>Index Selection</strong>: Always uses optimal index for pattern</li>
+            <li><strong>Lazy Evaluation</strong>: Memory-efficient streaming</li>
+            <li><strong>Join Ordering</strong>: Reduces intermediate result sizes</li>
+            <li><strong>Big-Endian Keys</strong>: Efficient range scans</li>
+        </ul>
+
+        <h3>Current Limitations</h3>
+        <ul>
+            <li><strong>Single-threaded</strong>: No parallel query execution</li>
+            <li><strong>Nested Loop Joins Only</strong>: Hash/merge joins TODO</li>
+            <li><strong>No Statistics</strong>: Selectivity based on heuristics only</li>
+            <li><strong>Limited Filter Evaluation</strong>: Expression evaluation incomplete</li>
+        </ul>
+
+        <h2>Future Enhancements</h2>
+
+        <h3>Short-term</h3>
+        <ol>
+            <li>Complete filter expression evaluation</li>
+            <li>Implement hash join and merge join</li>
+            <li>Add ORDER BY execution</li>
+            <li>Support OPTIONAL and UNION patterns</li>
+        </ol>
+
+        <h3>Medium-term</h3>
+        <ol>
+            <li>Collect statistics for better selectivity estimates</li>
+            <li>Parallel query execution</li>
+            <li>SPARQL UPDATE (INSERT/DELETE DATA)</li>
+            <li>RDF data format parsers (Turtle, N-Triples)</li>
+        </ol>
+
+        <h3>Long-term</h3>
+        <ol>
+            <li>RDF-star support (quoted triples)</li>
+            <li>Property paths</li>
+            <li>Aggregation functions</li>
+            <li>Full-text search integration</li>
+            <li>Federated query support</li>
+        </ol>
+
+        <h2>Comparison with Oxigraph</h2>
+
+        <h3>Similarities</h3>
+        <ul>
+            <li>11-index architecture</li>
+            <li>Big-endian key encoding</li>
+            <li>Term type + hash/data encoding</li>
+            <li>Volcano iterator model</li>
+            <li>Snapshot isolation</li>
+        </ul>
+
+        <h3>Differences</h3>
+        <ul>
+            <li><strong>Hash Function</strong>: xxHash3 128-bit vs SipHash-2-4</li>
+            <li><strong>Storage</strong>: BadgerDB vs RocksDB</li>
+            <li><strong>Language</strong>: Go vs Rust</li>
+            <li><strong>Maturity</strong>: Proof-of-concept vs production-ready</li>
+        </ul>
+
+        <h2>Testing Strategy</h2>
+
+        <h3>Unit Tests</h3>
+        <ul>
+            <li>RDF term encoding/decoding</li>
+            <li>Storage operations</li>
+            <li>SPARQL parser correctness</li>
+            <li>Query optimizer decisions</li>
+        </ul>
+
+        <h3>Integration Tests</h3>
+        <ul>
+            <li>End-to-end query execution</li>
+            <li>Transaction isolation</li>
+            <li>Index consistency</li>
+        </ul>
+
+        <h3>W3C SPARQL Test Suite</h3>
+        <ul>
+            <li>Official conformance tests</li>
+            <li>Located at: <a href="https://www.w3.org/2009/sparql/docs/tests/" target="_blank">https://www.w3.org/2009/sparql/docs/tests/</a></li>
+            <li>TODO: Implement test runner</li>
+        </ul>
+
+        <h2>References</h2>
+
+        <ul>
+            <li><a href="https://github.com/oxigraph/oxigraph/wiki/Architecture" target="_blank">Oxigraph Architecture Wiki</a></li>
+            <li><a href="https://www.w3.org/TR/sparql11-query/" target="_blank">SPARQL 1.1 Query Language</a></li>
+            <li><a href="https://www.w3.org/TR/rdf11-concepts/" target="_blank">RDF 1.1 Concepts</a></li>
+            <li><a href="https://paperhub.s3.amazonaws.com/dace52a42c07f7f8348b08dc2b186061.pdf" target="_blank">Volcano Iterator Model</a></li>
+            <li><a href="https://dgraph.io/blog/post/badger/" target="_blank">BadgerDB Paper</a></li>
+            <li><a href="https://github.com/Cyan4973/xxHash" target="_blank">xxHash</a></li>
+        </ul>
+    </main>
+
+    <footer>
+        <p>&copy; 2025 Trigo Project. Licensed under MIT License.</p>
+        <p>
+            <a href="https://github.com/carmel/triplestore" target="_blank">GitHub</a> |
+            <a href="https://github.com/carmel/triplestore/issues" target="_blank">Issues</a> |
+            <a href="https://github.com/carmel/triplestore/blob/main/CLAUDE.md" target="_blank">AI Assistant Context</a>
+        </p>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,163 @@
+package encoding
+
+import (
+	"encoding/binary"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/carmel/triplestore/rdf"
+	"github.com/carmel/triplestore/store"
+)
+
+// TermDecoder handles decoding of RDF terms
+type TermDecoder struct{}
+
+// NewTermDecoder creates a new term decoder
+func NewTermDecoder() *TermDecoder {
+	return &TermDecoder{}
+}
+
+// DecodeTerm decodes an encoded term back to an rdf.Term
+// For terms that require string lookup, stringValue should be provided
+func (d *TermDecoder) DecodeTerm(encoded store.EncodedTerm, stringValue *string) (rdf.Term, error) {
+	termType := GetTermType(encoded)
+
+	switch termType {
+	case rdf.TermTypeNamedNode:
+		if stringValue == nil {
+			return nil, fmt.Errorf("string value required for named node")
+		}
+		return rdf.NewNamedNode(*stringValue), nil
+
+	case rdf.TermTypeBlankNode:
+		if stringValue != nil {
+			return rdf.NewBlankNode(*stringValue), nil
+		}
+		// Try to decode as numeric ID
+		numericID := binary.BigEndian.Uint64(encoded[1:9])
+		return rdf.NewBlankNode(strconv.FormatUint(numericID, 10)), nil
+
+	case rdf.TermTypeStringLiteral:
+		if stringValue != nil {
+			return rdf.NewLiteral(*stringValue), nil
+		}
+		// Try to extract inline string
+		// Find null terminator or end of data
+		endIdx := 1
+		for endIdx < EncodedTermSize && encoded[endIdx] != 0 {
+			endIdx++
+		}
+		inlineStr := string(encoded[1:endIdx])
+		return rdf.NewLiteral(inlineStr), nil
+
+	case rdf.TermTypeLangStringLiteral:
+		if stringValue == nil {
+			return nil, fmt.Errorf("string value required for language-tagged literal")
+		}
+		// Split value@language[--direction]
+		for i := len(*stringValue) - 1; i >= 0; i-- {
+			if (*stringValue)[i] == '@' {
+				value := (*stringValue)[:i]
+				langDir := (*stringValue)[i+1:]
+
+				// Check for direction suffix (RDF 1.2: @lang--dir)
+				if idx := findDirectionSeparator(langDir); idx != -1 {
+					lang := langDir[:idx]
+					dir := langDir[idx+2:] // Skip "--"
+					return rdf.NewLiteralWithLanguageAndDirection(value, lang, dir), nil
+				}
+
+				return rdf.NewLiteralWithLanguage(value, langDir), nil
+			}
+		}
+		return rdf.NewLiteral(*stringValue), nil
+
+	case rdf.TermTypeTypedLiteral:
+		if stringValue == nil {
+			return nil, fmt.Errorf("string value required for typed literal")
+		}
+		// Split value^^datatypeIRI
+		// Format from encoder: "value^^datatypeIRI"
+		for i := len(*stringValue) - 1; i >= 1; i-- {
+			if (*stringValue)[i] == '^' && (*stringValue)[i-1] == '^' {
+				value := (*stringValue)[:i-1]
+				datatypeIRI := (*stringValue)[i+1:]
+				datatype := rdf.NewNamedNode(datatypeIRI)
+				return rdf.NewLiteralWithDatatype(value, datatype), nil
+			}
+		}
+		// Shouldn't happen if encoder is working correctly
+		return nil, fmt.Errorf("malformed typed literal string: %s", *stringValue)
+
+	case rdf.TermTypeIntegerLiteral:
+		if stringValue == nil {
+			return nil, fmt.Errorf("string value required for integer literal")
+		}
+		return rdf.NewLiteralWithDatatype(*stringValue, rdf.XSDInteger), nil
+
+	case rdf.TermTypeDecimalLiteral:
+		if stringValue == nil {
+			return nil, fmt.Errorf("string value required for decimal literal")
+		}
+		return rdf.NewLiteralWithDatatype(*stringValue, rdf.XSDDecimal), nil
+
+	case rdf.TermTypeDoubleLiteral:
+		if stringValue == nil {
+			return nil, fmt.Errorf("string value required for double literal")
+		}
+		return rdf.NewLiteralWithDatatype(*stringValue, rdf.XSDDouble), nil
+
+	case rdf.TermTypeBooleanLiteral:
+		value := encoded[1] != 0
+		return rdf.NewBooleanLiteral(value), nil
+
+	case rdf.TermTypeDateTimeLiteral:
+		// If original lexical form is available, use it to preserve timezone
+		if stringValue != nil {
+			return rdf.NewLiteralWithDatatype(*stringValue, rdf.XSDDateTime), nil
+		}
+		// Fallback: reconstruct from timestamp (may lose timezone info)
+		nanos := int64(binary.BigEndian.Uint64(encoded[1:9])) // #nosec G115 - intentional bit-pattern conversion for timestamp decoding
+		t := time.Unix(0, nanos).UTC()                        // Use UTC to avoid local timezone dependency
+		return rdf.NewDateTimeLiteral(t), nil
+
+	case rdf.TermTypeDateLiteral:
+		days := int64(binary.BigEndian.Uint64(encoded[1:9])) // #nosec G115 - intentional bit-pattern conversion for date decoding
+		t := time.Unix(days*86400, 0)
+		return rdf.NewLiteralWithDatatype(t.Format("2006-01-02"), rdf.XSDDate), nil
+
+	case rdf.TermTypeDefaultGraph:
+		return rdf.NewDefaultGraph(), nil
+
+	case rdf.TermTypeQuotedTriple:
+		if stringValue == nil {
+			return nil, fmt.Errorf("string value required for quoted triple")
+		}
+		// Parse the serialized quoted triple string
+		return parseQuotedTripleString(*stringValue)
+
+	default:
+		return nil, fmt.Errorf("unknown term type: %d", termType)
+	}
+}
+
+// findDirectionSeparator finds the "--" separator in language tag
+// Returns -1 if not found, or index of first '-' in "--"
+func findDirectionSeparator(langDir string) int {
+	for i := 0; i < len(langDir)-1; i++ {
+		if langDir[i] == '-' && langDir[i+1] == '-' {
+			return i
+		}
+	}
+	return -1
+}
+
+// parseQuotedTripleString parses a quoted triple from its string representation
+// Format: << subject predicate object >>
+func parseQuotedTripleString(s string) (*rdf.QuotedTriple, error) {
+	// This is a simplified parser for the stored string representation
+	// The actual parsing logic will be in the RDF parsers
+	// For now, we'll return an error indicating this needs proper parser integration
+	return nil, fmt.Errorf("quoted triple parsing from string requires integration with RDF parser: %s", s)
+}
